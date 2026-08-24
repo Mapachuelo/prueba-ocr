@@ -1,12 +1,16 @@
 import os
 import uuid
 import json
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from openpyxl import Workbook
+import xlwt
 
 from .ocr_extract import extract_table_from_pdf
 from .excel_handler import table_to_xlsx, table_to_xls, read_excel
@@ -82,15 +86,65 @@ async def upload_excel(file: UploadFile = File(...)):
         "row_count": len(data["rows"]),
     }
 
-@app.post("/api/download/xlsx")
-async def download_xlsx(data: TableData):
-    sid = data.session_id or str(uuid.uuid4())
+def _resolve_table(data: TableData):
     headers, rows = data.headers, data.rows
     if not headers and not rows and data.session_id:
         json_path = UPLOAD_DIR / f"{data.session_id}.json"
         if json_path.exists():
             saved = json.loads(json_path.read_text())
             headers, rows = saved.get("headers", []), saved.get("rows", [])
+    return headers, rows
+
+
+def _build_xlsx(headers: list, rows: list) -> BytesIO:
+    buf = BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    if headers:
+        ws.append(headers)
+    for row in rows:
+        ws.append(row)
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def _build_xls(headers: list, rows: list) -> BytesIO:
+    buf = BytesIO()
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    for col_idx, header in enumerate(headers):
+        ws.write(0, col_idx, header)
+    for row_idx, row in enumerate(rows, start=1):
+        for col_idx, value in enumerate(row):
+            ws.write(row_idx, col_idx, value)
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.post("/api/download/all")
+async def download_all(data: TableData):
+    sid = data.session_id or str(uuid.uuid4())
+    headers, rows = _resolve_table(data)
+    xlsx = _build_xlsx(headers, rows)
+    xls = _build_xls(headers, rows)
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("tabla.xlsx", xlsx.getvalue())
+        zf.writestr("tabla.xls", xls.getvalue())
+    zip_buf.seek(0)
+    return Response(
+        zip_buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="tabla_{sid}.zip"'},
+    )
+
+
+@app.post("/api/download/xlsx")
+async def download_xlsx(data: TableData):
+    sid = data.session_id or str(uuid.uuid4())
+    headers, rows = _resolve_table(data)
     output = DOWNLOAD_DIR / f"{sid}.xlsx"
     table_to_xlsx(headers, rows, str(output))
     return FileResponse(str(output), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="tabla.xlsx")
@@ -98,12 +152,7 @@ async def download_xlsx(data: TableData):
 @app.post("/api/download/xls")
 async def download_xls(data: TableData):
     sid = data.session_id or str(uuid.uuid4())
-    headers, rows = data.headers, data.rows
-    if not headers and not rows and data.session_id:
-        json_path = UPLOAD_DIR / f"{data.session_id}.json"
-        if json_path.exists():
-            saved = json.loads(json_path.read_text())
-            headers, rows = saved.get("headers", []), saved.get("rows", [])
+    headers, rows = _resolve_table(data)
     output = DOWNLOAD_DIR / f"{sid}.xls"
     table_to_xls(headers, rows, str(output))
     return FileResponse(str(output), media_type="application/vnd.ms-excel", filename="tabla.xls")
@@ -111,12 +160,7 @@ async def download_xls(data: TableData):
 @app.post("/api/download/pdf")
 async def download_pdf(data: TableData):
     sid = data.session_id or str(uuid.uuid4())
-    headers, rows = data.headers, data.rows
-    if not headers and not rows and data.session_id:
-        json_path = UPLOAD_DIR / f"{data.session_id}.json"
-        if json_path.exists():
-            saved = json.loads(json_path.read_text())
-            headers, rows = saved.get("headers", []), saved.get("rows", [])
+    headers, rows = _resolve_table(data)
     output = DOWNLOAD_DIR / f"{sid}.pdf"
     table_to_pdf(headers, rows, str(output))
     return FileResponse(str(output), media_type="application/pdf", filename="tabla.pdf")

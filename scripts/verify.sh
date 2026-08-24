@@ -21,15 +21,22 @@ echo "$RESP_JSON" > "$DATA_DIR/verify_response.json"
 SESSION_ID=$(echo "$RESP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
 echo "  Session: $SESSION_ID"
 
-echo "[3/4] Descargando XLSX..."
+echo "[3/5] Descargando XLSX..."
 curl -s -X POST http://localhost:8080/api/download/xlsx \
     -H "Content-Type: application/json" \
     -d "{\"session_id\": \"$SESSION_ID\"}" \
     -o "$DATA_DIR/verify_output.xlsx"
 echo "  Guardado: data/verify_output.xlsx"
 
+echo "[4/5] Descargando XLS..."
+curl -s -X POST http://localhost:8080/api/download/xls \
+    -H "Content-Type: application/json" \
+    -d "{\"session_id\": \"$SESSION_ID\"}" \
+    -o "$DATA_DIR/verify_output.xls"
+echo "  Guardado: data/verify_output.xls"
+
 echo ""
-echo "[4/4] RESUMEN DE EXTRACCIÓN:"
+echo "[5/5] RESUMEN DE EXTRACCIÓN:"
 echo "============================================"
 python3 -c "
 import json
@@ -80,6 +87,7 @@ echo "============================================"
 echo "Archivos generados:"
 echo "  - data/verify_response.json"
 echo "  - data/verify_output.xlsx"
+echo "  - data/verify_output.xls"
 echo ""
 echo "Para verificar: abre data/verify_output.xlsx y"
 echo "compara con las imágenes del PDF original."

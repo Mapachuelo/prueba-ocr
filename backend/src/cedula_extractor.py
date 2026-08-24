@@ -1,8 +1,27 @@
 import re
+
 import numpy as np
 from PIL import Image
 
-_ocr = None
+from .ocr_engine import get_text as _ocr_get_text
+
+_CLEAN_RE = re.compile(r"[^A-Za-z0-9ÁÉÍÓÚÑáéíóúñ .():,\-/+&<\n]")
+_MULTI_SPACE = re.compile(r"[ \t]+")
+
+MONTHS3 = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+MONTH_FULL = {
+    "ENERO": "ENE", "FEBRERO": "FEB", "MARZO": "MAR", "ABRIL": "ABR",
+    "MAYO": "MAY", "JUNIO": "JUN", "JULIO": "JUL", "AGOSTO": "AGO",
+    "SEPTIEMBRE": "SEP", "OCTUBRE": "OCT", "NOVIEMBRE": "NOV", "DICIEMBRE": "DIC",
+}
+_MONTHS = "|".join(list(MONTHS3) + list(MONTH_FULL.keys()))
+_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s*[-\–—/.:=&'*\s]?\s*(" + _MONTHS + r")\s*[-\–—/.:=&'*\s]?\s*(\d{2}|\d{4})\b",
+    re.IGNORECASE,
+)
+_RH_RE = re.compile(r"(?<![A-Z0-9])(?:O|A|B|AB)[ \t]*[+\-](?![0-9])", re.IGNORECASE)
+_HEIGHT_CM_RE = re.compile(r"(?<!\d)(\d{3})(?!\d)")
+_HEIGHT_M_RE = re.compile(r"(?<!\d)([12][.,]\d{2})(?!\d)")
 
 COLOMBIAN_CITIES = {
     "CALI", "MEDELLIN", "BOGOTA", "BOGOTÁ", "BARRANQUILLA", "CARTAGENA",
@@ -11,114 +30,431 @@ COLOMBIAN_CITIES = {
     "POPAYÁN", "TUNJA", "FLORENCIA", "YOPAL", "RIOHACHA", "VALLEDUPAR",
     "MONTERIA", "MONTERÍA", "SINCELEJO", "QUIBDO", "QUIBDÓ", "MOCOA",
     "LETICIA", "INIRIDA", "INÍRIDA", "PUERTO CARREÑO", "SAN JOSE DEL GUAVIARE",
-    "MITU", "MITÚ",
+    "MITU", "MITÚ", "PITALITO", "GARZON", "GARZÓN", "MILAN", "MILÁN",
+    "SOLANO", "LERIDA", "LÉRIDA", "EL PAUJIL", "EL DONCELLO", "MACARENA",
+    "SAN VICENTE DEL CAGUAN", "CALIMA", "QUIRA", "QUIRÁ", "MORELIA", "PITAL",
+    "VILLAGARZON", "VILLAGARZÓN", "BOGOTA D.C.", "BOGOTA D.C", "SAN JOSE",
+    "CARTAGO", "CARTAGENA DE CHAIRA", "CHAIRA", "SOLITA", "SOLITÁ", "VEGA",
 }
 
-MONTHS = {
-    "ENE": "ENE", "FEB": "FEB", "MAR": "MAR", "ABR": "ABR",
-    "MAY": "MAY", "JUN": "JUN", "JUL": "JUL", "AGO": "AGO",
-    "SEP": "SEP", "OCT": "OCT", "NOV": "NOV", "DIC": "DIC",
-}
-
-MONTH_FULL = {
-    "ENERO": "ENE", "FEBRERO": "FEB", "MARZO": "MAR", "ABRIL": "ABR",
-    "MAYO": "MAY", "JUNIO": "JUN", "JULIO": "JUL", "AGOSTO": "AGO",
-    "SEPTIEMBRE": "SEP", "OCTUBRE": "OCT", "NOVIEMBRE": "NOV", "DICIEMBRE": "DIC",
-}
-
-REMOVE_CHARS = re.compile(r"[^A-ZÁÉÍÓÚÑ0-9\s/()=:,.ºÑñ-]")
-SPACES = re.compile(r"\s+")
-CITY_DEPTO = re.compile(r"([A-ZÁÉÍÓÚÑ]{4,})\s*\(([A-ZÁÉÍÓÚÑ\s]+)\)")
-DATE_RE = re.compile(
-    r"(\d{1,2})\s*[-–—/]\s*([A-Za-z]{3,9})\s*[-–—/]\s*(\d{2,4})"
+_STOP_LINES = (
+    "REPUBLICA", "COLOMBIA", "IDENTIFICA", "CEDULA", "CIUDADANIA", "NUMERO",
+    "NÚMERO", "NUIP", "FECHA", "LUGAR", "ESTATURA", "NACIMIENTO", "EXPEDICI",
+    "NACIONALIDAD", "INDICE", "DEREC", "REGISTRADOR", "FIRMA", "NOMBRE",
+    "CAMSCAN", "SCANNED", "POWERED", "G.S.", "GS.", "SEXO", "SANCHEZ TORRES",
+    "SÁNCHEZ", "TOARES", "MUI", "COL ", "NOMBRES", "APELLIDOS", "RH", "Y LUGAR",
 )
 
 
-def _get_ocr():
-    global _ocr
-    if _ocr is None:
-        from paddleocr import PaddleOCR
-        import logging
-        logging.getLogger("ppocr").setLevel(logging.ERROR)
-        _ocr = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            use_gpu=False,
-            show_log=False,
-        )
-    return _ocr
-
-
-def extract_from_image(pil_image: Image.Image, dpi: int = 200) -> dict:
-    img_np = np.array(pil_image.convert("RGB"))
-    ocr = _get_ocr()
-    try:
-        raw = ocr.ocr(img_np, cls=True)
-    except Exception:
-        return _empty_result("ocr_error")
-
-    if not raw:
-        return _empty_result("no_result")
-
-    entries = raw
-    while isinstance(entries, list) and len(entries) == 1 and isinstance(entries[0], (list, tuple)) and not isinstance(entries[0][0], (int, float)):
-        entries = entries[0]
-
-    if not entries:
-        return _empty_result("no_entries")
-
-    lines_map = {}
-    for bbox, (text, conf) in entries:
-        y_center = (bbox[0][1] + bbox[2][1]) / 2
-        row_key = int(round(y_center / 22) * 22)
-        if row_key not in lines_map:
-            lines_map[row_key] = []
-        lines_map[row_key].append((bbox[0][0], text.strip(), conf))
-
+def _norm_lines(text: str):
     lines = []
-    for row_key in sorted(lines_map.keys()):
-        words = sorted(lines_map[row_key], key=lambda x: x[0])
-        line_text = " ".join(w[1] for w in words)
-        if line_text:
-            lines.append(line_text)
+    for raw in (text or "").split("\n"):
+        line = _MULTI_SPACE.sub(" ", _CLEAN_RE.sub(" ", raw)).strip()
+        lines.append(line)
+    return lines
 
-    combined = "\n".join(lines)
 
-    barcode = _parse_barcode(combined)
-    cedula = _extract_cedula(combined, barcode)
-    apellidos = _extract_field(combined, "APELLIDOS", ["NOMBRES", "FECHA", "LUGAR"])
-    nombres = _extract_field(combined, "NOMBRES", ["FECHA", "LUGAR", "APELLIDOS"])
-    fecha_nac = _extract_fecha_nac(combined)
-    lugar_nac = _extract_lugar(combined, "NACIMIENTO")
-    rh, sexo, est = _extract_rh_sexo_est(combined)
-    sexo = sexo or barcode.get("sexo", "")
-    fecha_exp, lugar_exp = _extract_expedicion(combined)
+def _alpha(s: str) -> str:
+    return " ".join(re.findall(r"[A-ZÁÉÍÓÚÑ]+", s.upper()))
 
-    mrz = _parse_mrz(combined)
+
+def _is_name_line(line: str) -> bool:
+    t = _alpha(line)
+    if len(t) < 4:
+        return False
+    if re.search(r"\d", line):
+        return False
+    words = t.split()
+    if not words:
+        return False
+    up = " " + t + " "
+    if any(k in up for k in _STOP_LINES):
+        return False
+    if len(words) == 1 and len(words[0]) <= 3:
+        return False
+    return True
+
+
+def _is_label_line(line: str, kind: str) -> bool:
+    t = _alpha(line)
+    if not t:
+        return False
+    if kind == "apellidos":
+        return bool(re.match(r"^(A?PEL|APE|AP5)", t)) and "NOMB" not in t
+    if kind == "nombres":
+        return bool(re.search(r"(?:^|\s)(?:NOMB|OMBR|CMBR|MBR)", " " + t))
+    if kind == "fecha_nac":
+        return bool(re.search(r"F[ECIO]\w{1,4}\s*(?:DE\s*)?(?:NAC|NAG|NAT)\w*IENTO", t))
+    if kind == "lugar_nac":
+        return bool(re.search(r"LUG(?:AR|AA|AN|RA|A)\s*(?:DE\s*)?(?:NAC|NAG|NAT)\w*IENTO", t))
+    if kind == "expedicion":
+        return ("EXPEDIC" in t or "EXBED" in t) and ("LUGAR" in t or "FECHA" in t or "LUGA" in t or "LUGRA" in t)
+    if kind == "estatura":
+        return any(k in t for k in ("ESTATURA", "G.S.", "GS", "NACIONALIDAD"))
+    return False
+
+
+def _find_label(lines, kind) -> int:
+    for i, line in enumerate(lines):
+        if _is_label_line(line, kind):
+            return i
+    return -1
+
+
+def _scan_back_names(lines, idx) -> str:
+    parts = []
+    for i in range(idx - 1, max(-1, idx - 4), -1):
+        if _is_name_line(lines[i]):
+            parts.insert(0, _alpha(lines[i]))
+        else:
+            break
+    return " ".join(dict.fromkeys(parts))
+
+
+def _scan_forward_names(lines, idx) -> str:
+    parts = []
+    for i in range(idx + 1, min(len(lines), idx + 4)):
+        if _is_name_line(lines[i]):
+            parts.append(_alpha(lines[i]))
+        else:
+            break
+    return " ".join(dict.fromkeys(parts))
+
+
+def _clean_name(s: str) -> str:
+    s = " ".join(re.findall(r"[A-ZÁÉÍÓÚÑ]+", s.upper()))
+    words = [w for w in s.split() if len(w) > 1 or w in ("DE", "LA", "EL", "DEL")]
+    keep_end = ("DE", "LA", "DEL", "AL", "OS")
+    while len(words) > 1 and len(words[-1]) <= 2 and words[-1] not in keep_end:
+        words.pop()
+    return " ".join(words).strip()
+
+
+def _extract_names(lines, is_new) -> tuple:
+    if is_new:
+        ap = _find_label(lines, "apellidos")
+        no = _find_label(lines, "nombres")
+        apellidos = _scan_forward_names(lines, ap) if ap >= 0 else ""
+        nombres = _scan_forward_names(lines, no) if no >= 0 else ""
+        if not apellidos and no >= 0:
+            apellidos = _scan_back_names(lines, no)
+        if not apellidos and not nombres:
+            apellidos, nombres = _fallback_names(lines)
+        return _clean_name(apellidos), _clean_name(nombres)
+
+    ap = _find_label(lines, "apellidos")
+    no = _find_label(lines, "nombres")
+    apellidos = _scan_back_names(lines, ap) if ap >= 0 else ""
+    nombres = ""
+    if no >= 0:
+        nombres = _scan_back_names(lines, no)
+    if ap >= 0 and no < 0:
+        nombres = _scan_forward_names(lines, ap)
+    if not apellidos and not nombres:
+        apellidos, nombres = _fallback_names(lines)
+    return _clean_name(apellidos), _clean_name(nombres)
+
+
+def _fallback_names(lines) -> tuple:
+    lines_clean = [re.sub(r"\d", "", l) for l in lines]
+    names = []
+    started = False
+    for line in lines_clean:
+        if re.search(r"\b(N[UÚ]MERO|NUIP|No\.?)\b", _alpha(line)):
+            started = True
+            continue
+        if not started:
+            continue
+        up = line.upper()
+        if any(k in up for k in ("DEREC", "INDICE", "REGISTRADOR", "FECHA", "ESTATURA", "LUGAR", "CAMSCAN")):
+            break
+        if _is_name_line(line):
+            words = [w for w in _alpha(line).split() if len(w) > 1]
+            names.append(" ".join(words[:2]))
+            if len(names) >= 2:
+                break
+    if not names:
+        return "", ""
+    return _clean_name(names[0]), _clean_name(names[1] if len(names) > 1 else "")
+
+
+def _parse_date(match, line: str = "") -> str:
+    day, month_str, year = match.group(1), match.group(2).upper(), match.group(3)
+    month = month_str[:3] if len(month_str) <= 3 else MONTH_FULL.get(month_str)
+    if not month or month not in MONTHS3:
+        return ""
+    if not (1 <= int(day) <= 31):
+        return ""
+    if len(year) != 4:
+        return ""
+    return f"{day.zfill(2)}-{month}-{year}"
+
+
+def _find_date_in_lines(lines, start, end) -> str:
+    for i in range(start, min(end, len(lines))):
+        for m in _DATE_RE.finditer(lines[i]):
+            d = _parse_date(m, lines[i])
+            if d:
+                return d
+    return ""
+
+
+def _extract_fecha_nac(lines) -> str:
+    idx = _find_label(lines, "fecha_nac")
+    if idx >= 0:
+        d = _find_date_in_lines(lines, idx, idx + 3)
+        if d:
+            return d
+    for i, line in enumerate(lines):
+        up = line.upper()
+        if "LUGAR" in up:
+            continue
+        has_nac = any(k in up for k in ("NACIMIENTO", "NACMIENTO", "NAGIMIENTO"))
+        has_fec = any(k in up for k in ("FEC", "FOCH"))
+        if has_nac and has_fec:
+            d = _find_date_in_lines(lines, i, i + 3)
+            if d:
+                return d
+    return ""
+
+
+def _normalize_place(raw: str) -> str:
+    raw = _MULTI_SPACE.sub(" ", _CLEAN_RE.sub(" ", raw)).strip().upper()
+    raw = raw.strip("( ):-.,")
+    if not raw:
+        return ""
+    for city in COLOMBIAN_CITIES:
+        if city in raw:
+            if city.startswith("BOGOTA"):
+                return "BOGOTA"
+            return city
+    m = re.search(r"\(([A-ZÁÉÍÓÚÑ ]+)\)", raw)
+    depto = m.group(1).strip() if m else ""
+    before = raw.split("(")[0].strip(" -:.,")
+    words = [w for w in re.findall(r"[A-ZÁÉÍÓÚÑ]{4,}", before)]
+    if len(words) >= 2 and words[-1] in COLOMBIAN_CITIES:
+        return words[-1]
+    if words:
+        return " ".join(words)
+    if depto:
+        return depto
+    return ""
+
+
+def _place_like(line: str) -> bool:
+    up = line.upper()
+    if re.search(r"\d", up):
+        return False
+    if any(k in up for k in ("FECHA", "LUGAR", "ESTATURA", "NACIMIENTO", "EXPEDICI", "INDICE", "DEREC", "REGISTRADOR", "SEXO", "RH", "G.S.", "GS", "NACIONALIDAD", "REPUBLICA", "IDENTIFICA", "CEDULA", "CAMSCAN")):
+        return False
+    t = _alpha(up)
+    return len(t) >= 3
+
+
+def _extract_lugar(lines, is_new) -> str:
+    idx = _find_label(lines, "lugar_nac")
+    if idx < 0:
+        return ""
+    if is_new:
+        snippet = " ".join(lines[idx + 1:idx + 4])
+    else:
+        parts = []
+        for i in range(idx - 1, max(-1, idx - 4), -1):
+            if _place_like(lines[i]):
+                parts.insert(0, lines[i])
+            else:
+                break
+        snippet = " ".join(parts)
+    snippet = re.sub(r"\d{1,2}[-\–—/.:=&'*\s]*[A-Z]{3,9}[-\–—/.:=&'*\s]*\d{2,4}", " ", snippet, flags=re.I)
+    snippet = _MULTI_SPACE.sub(" ", snippet).strip()
+    return _normalize_place(snippet)
+
+
+def _extract_rh(lines) -> str:
+    win_lines = set()
+    for i, line in enumerate(lines):
+        up = line.upper()
+        if any(k in up for k in ("ESTATURA", "G.S.", "GS", "RH", "SEXO", "COL", "NACIONALIDAD", "NACIMIENTO")):
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < len(lines):
+                    win_lines.add(j)
+    win = "\n".join(lines[j] for j in sorted(win_lines))
+    m = _RH_RE.search(win)
+    if m:
+        return m.group(0).replace(" ", "").upper()
+    return ""
+
+
+def _extract_estatura(lines, is_new, text: str) -> str:
+    cands = []
+    for m in _HEIGHT_M_RE.finditer(text):
+        cands.append(round(float(m.group(1).replace(",", ".")) * 100))
+    for line in lines:
+        if "COL" in line.upper() or any(k in line.upper() for k in ("ESTATURA", "G.S.", "GS", "NACIONALIDAD")):
+            for m in _HEIGHT_CM_RE.finditer(line):
+                cands.append(int(m.group(1)))
+    for v in cands:
+        if 130 <= v <= 220:
+            return str(v)
+    return ""
+
+
+def _extract_sexo(text: str, barcode_sexo: str, mrz_sexo: str) -> str:
+    if barcode_sexo:
+        return barcode_sexo
+    if mrz_sexo:
+        return mrz_sexo
+    for m in re.finditer(r"\bCOL\s+[\d.,]+\s+([MF])\b", text, re.I):
+        return m.group(1).upper()
+    return ""
+
+
+def _extract_expedicion(lines, is_new) -> tuple:
+    idx = _find_label(lines, "expedicion")
+    if idx < 0:
+        for i, line in enumerate(lines):
+            if "EXPEDICI" in line.upper():
+                idx = i
+                break
+    if idx < 0:
+        return "", ""
+    if is_new:
+        start, end = idx, idx + 4
+    else:
+        start, end = max(0, idx - 3), idx + 2
+    for i in range(start, min(end, len(lines))):
+        for m in _DATE_RE.finditer(lines[i]):
+            d = _parse_date(m, lines[i])
+            if not d:
+                continue
+            rest = lines[i].split(m.group(0))[-1]
+            rest = re.sub(r"[0-9]", " ", rest)
+            rest = _MULTI_SPACE.sub(" ", _CLEAN_RE.sub(" ", rest)).strip(" ,:-.")
+            place = _normalize_place(rest)
+            return d, place
+    return "", ""
+
+
+_BARCODE_RE = re.compile(
+    r"(?:^|[^A-Z0-9])[AP]?[-\s]?\d{6,9}[-\s]([\d .,]{5,12})[-\s]?([MF])[-\s]?[\d .]",
+    re.IGNORECASE,
+)
+
+
+def _parse_barcode(text: str) -> dict:
+    result = {"sexo": "", "cedulas": []}
+    for m in _BARCODE_RE.finditer(text):
+        result["cedulas"].append(m.group(1))
+        result["sexo"] = m.group(2).upper()
+    return result
+
+
+def _parse_mrz(lines) -> dict:
+    res = {"cedula": "", "apellidos": "", "nombres": "", "fecha_nac": "", "sexo": ""}
+    for line in lines:
+        if "<" not in line:
+            continue
+        if re.search(r"[A-Z]+<+[A-Z]", line):
+            parts = [re.sub(r"[^A-Z]+$", "", p) for p in line.replace(" ", "").split("<")]
+            parts = [p for p in parts if p]
+            if len(parts) >= 2:
+                res["apellidos"] = " ".join(parts[:2])
+                if len(parts) > 2:
+                    res["nombres"] = " ".join(parts[2:])
+        m = re.search(r"\b(\d{2})(\d{2})(\d{2})([MF])\d*COL(\d{6,11})", line, re.I)
+        if m and not res["cedula"]:
+            yy, mm, dd, sexo, ced = m.groups()
+            if 1 <= int(mm) <= 12 and 1 <= int(dd) <= 31:
+                yy_f = "20" + yy if int(yy) < 60 else "19" + yy
+                res["fecha_nac"] = f"{dd}-{MONTHS3[int(mm) - 1]}-{yy_f}"
+                res["sexo"] = sexo.upper()
+                res["cedula"] = ced
+    return res
+
+
+def _is_valid_cedula(s: str) -> bool:
+    return bool(s) and 6 <= len(s) <= 11
+
+
+def _clean_num(s: str) -> str:
+    return re.sub(r"\D", "", s)
+
+
+def _is_barcode_line(line: str) -> bool:
+    return bool(_BARCODE_RE.search(line)) or bool(re.match(r"^[AP][-\s]", line.strip()))
+
+
+def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict) -> str:
+    for pat in (r"NUIP\s*[:\-.,]?\s*([\d.,]{6,18})", r"(?:N[UÚ]MERO|No\.?)\s*[:\-.,]?\s*([\d.,]{6,18})"):
+        for m in re.finditer(pat, upper, re.I):
+            n = _clean_num(m.group(1))
+            if _is_valid_cedula(n):
+                return n
+    if _is_valid_cedula(mrz.get("cedula")):
+        return mrz["cedula"]
+    for n in barcode.get("cedulas", []):
+        n = _clean_num(n)
+        if _is_valid_cedula(n):
+            return n
+    for line in lines:
+        if _is_barcode_line(line):
+            continue
+        for n in sorted(set(re.findall(r"\d[\d.,]{5,14}", line)), key=len, reverse=True):
+            n = _clean_num(n)
+            if _is_valid_cedula(n):
+                return n
+    return ""
+
+
+def parse_cedula_text(text: str) -> dict:
+    lines = _norm_lines(text)
+    upper = " ".join(lines).upper()
+    barcode = _parse_barcode(text)
+    mrz = _parse_mrz(lines)
+    is_new = ("NUIP" in upper) or ("1CCO" in upper) or ("<<<<<" in upper) or ("NACIONALIDAD" in upper)
+
+    cedula = _extract_cedula(upper, lines, barcode, mrz)
+    apellidos, nombres = _extract_names(lines, is_new)
     if not apellidos and mrz.get("apellidos"):
         apellidos = mrz["apellidos"]
     if not nombres and mrz.get("nombres"):
         nombres = mrz["nombres"]
+
+    fecha_nac = _extract_fecha_nac(lines)
     if not fecha_nac and mrz.get("fecha_nac"):
         fecha_nac = mrz["fecha_nac"]
-    if not sexo and mrz.get("sexo"):
-        sexo = mrz["sexo"]
-    if not cedula and mrz.get("cedula"):
-        cedula = mrz["cedula"]
+
+    lugar_nac = _extract_lugar(lines, is_new)
+    rh = _extract_rh(lines)
+    est = _extract_estatura(lines, is_new, upper)
+    sexo = _extract_sexo(upper, barcode.get("sexo", ""), mrz.get("sexo", ""))
+    fecha_exp, lugar_exp = _extract_expedicion(lines, is_new)
 
     return {
-        "_ocr_raw": combined[:600],
         "numero": cedula,
         "apellidos": apellidos,
         "nombres": nombres,
-        "fecha_nacimiento": _clean_fecha(fecha_nac),
-        "lugar_nacimiento": _clean_lugar(lugar_nac),
+        "fecha_nacimiento": fecha_nac,
+        "lugar_nacimiento": lugar_nac,
         "rh": rh,
         "sexo": sexo,
-        "estatura": _clean_estatura(est),
-        "fecha_expedicion": _clean_fecha(fecha_exp),
-        "lugar_expedicion": _clean_lugar(lugar_exp),
+        "estatura": est,
+        "fecha_expedicion": fecha_exp,
+        "lugar_expedicion": lugar_exp,
     }
+
+
+def extract_from_image(pil_image: Image.Image, dpi: int = 200) -> dict:
+    text = _ocr_get_text(pil_image)
+    result = parse_cedula_text(text)
+    result["_ocr_raw"] = text[:900]
+    return result
+
+
+def extract_from_pdf_page(pil_image: Image.Image, page_num: int, dpi: int = 200) -> dict:
+    result = extract_from_image(pil_image, dpi)
+    result["pagina"] = page_num
+    return result
 
 
 def _empty_result(reason: str = "") -> dict:
@@ -129,258 +465,3 @@ def _empty_result(reason: str = "") -> dict:
         "rh": "", "sexo": "", "estatura": "",
         "fecha_expedicion": "", "lugar_expedicion": "",
     }
-
-
-def extract_from_pdf_page(pil_image: Image.Image, page_num: int, dpi: int = 200) -> dict:
-    result = extract_from_image(pil_image, dpi)
-    result["pagina"] = page_num
-    return result
-
-
-def _parse_barcode(text: str) -> dict:
-    result = {"cedula": "", "sexo": "", "fecha": ""}
-    all_nums = re.findall(r"\d{6,12}", text)
-    for n in all_nums:
-        if _is_date(n):
-            result["fecha"] = n
-    sex_m = re.search(r"[-–—\s]([MF])[-–—\s]", text, re.IGNORECASE)
-    if sex_m:
-        result["sexo"] = sex_m.group(1).upper()
-    ced_nums = [n for n in all_nums if not _is_date(n) and not _is_prefix(n)
-                and len(n) >= 6]
-    if ced_nums:
-        result["cedula"] = max(ced_nums, key=lambda n: len(n.lstrip("0")))
-    elif all_nums:
-        result["cedula"] = max(all_nums, key=len)
-    return result
-
-
-def _is_date(s: str) -> bool:
-    return (len(s) == 8 and s[:4].isdigit() and 2000 <= int(s[:4]) <= 2030
-            and 1 <= int(s[4:6]) <= 12 and 1 <= int(s[6:8]) <= 31)
-
-
-def _is_prefix(s: str) -> bool:
-    return (len(s) == 7 and (s.startswith("44") or s.startswith("19")))
-
-
-def _is_valid_cedula(s: str) -> bool:
-    if not s or len(s) < 6 or len(s) > 11:
-        return False
-    if s.startswith("44") and len(s) == 7:
-        return False
-    if s.startswith("190") and 6 <= len(s) <= 8:
-        return False
-    return True
-
-
-def _extract_cedula(text: str, barcode: dict) -> str:
-    for pattern in [
-        r"(?:N[UÚ]MERO|No\.?|CEDULA|N[°º])\s*[:\-]?\s*([\d\s.]{7,16})",
-        r"(?:CEDULA\s+DE\s+CIUDADANIA)\s*[\s\S]{0,20}?(\d[\d\s.]{6,14})",
-        r"NUIP\s*[:\-]?\s*([\d\s.,]{7,16})",
-    ]:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            n = re.sub(r"\D", "", m.group(1))
-            if _is_valid_cedula(n):
-                return n
-    nums = re.findall(r"\b(\d[\d\s.]{6,15})\b", text)
-    for n in nums:
-        cleaned = re.sub(r"\D", "", n)
-        if _is_valid_cedula(cleaned):
-            return cleaned
-    if barcode.get("cedula") and _is_valid_cedula(barcode["cedula"].lstrip("0")):
-        return barcode["cedula"]
-    all_nums = re.findall(r"\d{6,11}", text)
-    for n in sorted(all_nums, key=len, reverse=True):
-        if _is_valid_cedula(n.lstrip("0")):
-            return n.lstrip("0") or n
-    return ""
-
-
-def _extract_field(text: str, label: str, stop_words: list) -> str:
-    upper = text.upper()
-    idx = upper.find(label)
-    if idx < 0:
-        return ""
-    rest = upper[idx + len(label):].strip().lstrip(":- ")
-    for sw in stop_words:
-        si = rest.find(sw)
-        if si > 0:
-            rest = rest[:si]
-    stop_kw = {"CEDULA DE CIUDADANIA", "REPUBLICA DE COLOMBIA", "POWERED BY",
-               "SCANNED WITH", "CAMSCANNER", "NÚMERO", "NUMERO", "No.",
-               "INDICE", "REGISTRADOR", "FECHA DE NACIMIENTO",
-               "LUGAR DE NACIMIENTO", "ESTATURA", "G.S.", "FECHA Y LUGAR",
-               "EXPEDICION", "EXPEDICIÓN", "IDENTIFICACION PERSONAL"}
-    for sw in stop_kw:
-        si = rest.find(sw)
-        if 0 < si < 60:
-            rest = rest[:si]
-    rest = SPACES.sub(" ", REMOVE_CHARS.sub(" ", rest)).strip().upper()
-    words = rest.split()
-    result = " ".join(w for w in words if len(w) > 1 or w in "ÁÉÍÓÚÑáéíóúñ")
-    noise = sum(1 for c in result if not c.isalpha() and c != " ")
-    alpha = sum(1 for c in result if c.isalpha())
-    if result and len(result) > 1 and alpha > 0 and noise < alpha:
-        if not any(sw in result for sw in stop_kw):
-            return result
-    return ""
-
-
-def _extract_fecha_nac(text: str) -> str:
-    idx = text.upper().find("NACIMIENTO")
-    snippet = text[max(0, idx - 10):idx + 100] if idx >= 0 else text[:300]
-    for m in DATE_RE.finditer(snippet):
-        date = _parse_date_match(m)
-        if date:
-            return date
-    for m in DATE_RE.finditer(text):
-        date = _parse_date_match(m)
-        if date:
-            return date
-    return ""
-
-
-def _parse_date_match(match) -> str:
-    day, month_str, year = match.group(1), match.group(2).upper()[:3], match.group(3)
-    month = MONTHS.get(month_str) or MONTH_FULL.get(month_str)
-    if not month and month_str.isdigit():
-        mn = int(month_str)
-        if 1 <= mn <= 12:
-            month = list(MONTHS.values())[mn - 1]
-    if month and 1 <= int(day) <= 31:
-        day = day.zfill(2)
-        if len(year) == 2:
-            year = "20" + year if int(year) < 30 else "19" + year
-        return f"{day}-{month}-{year}"
-    return ""
-
-
-def _extract_lugar(text: str, keyword: str) -> str:
-    idx = text.upper().find(keyword)
-    if idx < 0:
-        return ""
-    rest = text[idx + len(keyword):].strip().lstrip(":- ")[:80]
-    for sw in ["G.S.", "ESTATURA", "SEXO", "RH", "FECHA", "EXPEDIC", "LUGAR"]:
-        si = rest.upper().find(sw)
-        if si > 0:
-            rest = rest[:si]
-    rest = SPACES.sub(" ", REMOVE_CHARS.sub(" ", rest)).strip()
-    return rest
-
-
-def _extract_rh_sexo_est(text: str) -> tuple:
-    rh, sexo, est = "", "", ""
-    idx = -1
-    for kw in ["ESTATURA", "G.S.", "SEXO", "RH"]:
-        p = text.upper().find(kw)
-        if p >= 0:
-            idx = p
-            break
-    if idx < 0:
-        return ("", "", "")
-    snippet = text[max(0, idx - 30):idx + 120]
-    m_rh = re.search(
-        r"\b(O\s*[+]|A\s*[+]|B\s*[+]|AB\s*[+]|O\s*[-]|A\s*[-]|B\s*[-]|AB\s*[-])",
-        snippet, re.IGNORECASE
-    )
-    if m_rh:
-        rh = m_rh.group(1).replace(" ", "")
-    m_sex = re.search(r"\b([MF])\b", snippet, re.IGNORECASE)
-    if m_sex:
-        sexo = m_sex.group(1).upper()
-    m_est = re.search(r"(\d{2,3}(?:[.,]\d{0,2})?)", snippet)
-    if m_est:
-        val = m_est.group(1).replace(",", ".")
-        try:
-            if 30 <= float(val) <= 250:
-                est = val.split(".")[0]
-        except ValueError:
-            pass
-    return (rh, sexo, est)
-
-
-def _extract_expedicion(text: str) -> tuple:
-    idx = text.upper().find("EXPEDIC")
-    if idx < 0:
-        return ("", "")
-    snippet = text[idx:idx + 120]
-    m = DATE_RE.search(snippet)
-    if m:
-        date = _parse_date_match(m)
-        rest = snippet.split(m.group(0))[-1].strip()[:60]
-        rest = SPACES.sub(" ", REMOVE_CHARS.sub(" ", rest)).strip()
-        place = rest.split("INDICE")[0].split("REGI")[0].strip()
-        return (date, place)
-    return ("", "")
-
-
-def _parse_mrz(text: str) -> dict:
-    result = {"cedula": "", "apellidos": "", "nombres": "", "fecha_nac": "", "sexo": ""}
-    name_lines = []
-    doc_nums = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or "<" not in line:
-            continue
-        if re.search(r"[A-Z]+<+[A-Z]", line):
-            name_lines.append(line)
-        nums = re.findall(r"(\d{6,12})", line)
-        for n in nums:
-            if not _is_date(n) and not _is_prefix(n):
-                doc_nums.append(n)
-        date_m = re.search(r"(\d{6})(\d)?.", line)
-        if date_m and not result["fecha_nac"]:
-            d = date_m.group(1)
-            yy, mm, dd = d[:2], d[2:4], d[4:6]
-            if 1 <= int(mm) <= 12 and 1 <= int(dd) <= 31:
-                yy_f = "20" + yy if int(yy) < 60 else "19" + yy
-                month = list(MONTHS.values())[int(mm) - 1]
-                result["fecha_nac"] = f"{dd}-{month}-{yy_f}"
-        sex_m = re.search(r"\d{7}([MF])", line, re.IGNORECASE)
-        if sex_m and not result["sexo"]:
-            result["sexo"] = sex_m.group(1).upper()
-    if name_lines and not result["nombres"]:
-        full = " ".join(name_lines).replace("<", " ").strip()
-        full = SPACES.sub(" ", full).strip()
-        parts = full.split()
-        if len(parts) >= 2:
-            result["apellidos"] = " ".join(parts[:2])
-            if len(parts) > 2:
-                result["nombres"] = " ".join(parts[2:])
-    if doc_nums and not result["cedula"]:
-        result["cedula"] = max(doc_nums, key=len)
-    return result
-
-
-def _clean_fecha(val: str) -> str:
-    if not val or len(val) < 10:
-        return ""
-    return val
-
-
-def _clean_lugar(val: str) -> str:
-    if not val or len(val) < 3:
-        return ""
-    val = SPACES.sub(" ", REMOVE_CHARS.sub(" ", val)).strip().upper()
-    val = val.lstrip("( ").rstrip(") ")
-    if not val:
-        return ""
-    for city in COLOMBIAN_CITIES:
-        if city in val:
-            return city
-    m = CITY_DEPTO.search(val)
-    if m:
-        return m.group(1).upper()
-    return val.strip()
-
-
-def _clean_estatura(val: str) -> str:
-    if not val:
-        return ""
-    m = re.search(r"(\d{2,3})", val)
-    if m and 30 <= int(m.group(1)) <= 250:
-        return str(int(m.group(1)))
-    return ""

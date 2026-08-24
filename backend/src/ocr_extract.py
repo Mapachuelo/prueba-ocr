@@ -3,7 +3,7 @@ from pdf2image import convert_from_path
 from .cedula_extractor import extract_from_pdf_page
 
 
-EXTRACTOR_VERSION = "cedula_v1"
+EXTRACTOR_VERSION = "cedula_v2_tesseract"
 
 
 def extract_table_from_pdf(pdf_path: str) -> dict:
@@ -69,7 +69,7 @@ def _extract_cedulas(pdf_path: str) -> dict:
                 data.get("estatura", ""),
                 data.get("fecha_expedicion", ""),
                 data.get("lugar_expedicion", ""),
-                raw_ocr[:300],
+                raw_ocr[:900],
             ])
             raw_texts.append({"pagina": page_num, "ocr_raw": raw_ocr, "ocr_full": raw_full})
         except Exception as e:
