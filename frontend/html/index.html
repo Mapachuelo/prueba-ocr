@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR PDF a Excel</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>OCR PDF &harr; Excel</h1>
+    </header>
+
+    <div class="container">
+        <div id="message" class="message"></div>
+
+        <div class="card">
+            <div class="upload-zone" id="uploadZone">
+                <div class="icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                </div>
+                <p><strong>Selecciona o arrastra un archivo</strong></p>
+                <p style="font-size:0.8rem;color:#94a3b8;">PDF, XLSX o XLS</p>
+                <input type="file" id="fileInput" accept=".pdf,.xlsx,.xls">
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p style="margin-top:0.75rem;">Procesando archivo...</p>
+            </div>
+        </div>
+
+        <div id="result">
+            <div class="card">
+                <div class="table-info">
+                    <div>
+                        <strong id="fileName"></strong>
+                        <span class="info-text" id="rowCount"></span>
+                    </div>
+                    <button class="btn btn-danger" id="clearBtn" onclick="clearResult()">
+                        Limpiar
+                    </button>
+                </div>
+
+                <div class="table-wrapper">
+                    <table id="dataTable">
+                        <thead id="tableHead"></thead>
+                        <tbody id="tableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="actions">
+                    <button class="btn btn-success" onclick="download('xlsx', this)">
+                        Descargar XLSX
+                    </button>
+                    <button class="btn btn-warning" onclick="download('xls', this)">
+                        Descargar XLS
+                    </button>
+                    <button class="btn btn-primary" onclick="download('pdf', this)">
+                        Descargar PDF
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>OCR PDF a Excel &mdash; Prueba de concepto</footer>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const message = document.getElementById('message');
+        const result = document.getElementById('result');
+        const fileName = document.getElementById('fileName');
+        const rowCount = document.getElementById('rowCount');
+        const tableHead = document.getElementById('tableHead');
+        const tableBody = document.getElementById('tableBody');
+
+        let currentData = { headers: [], rows: [] };
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length) handleFile(files[0]);
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFile(fileInput.files[0]);
+        });
+
+        function handleFile(file) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['pdf', 'xlsx', 'xls'].includes(ext)) {
+                showMessage('Formato no soportado. Usa PDF, XLSX o XLS.', 'error');
+                return;
+            }
+            showLoading(true);
+            hideMessage();
+
+            const endpoint = ext === 'pdf' ? '/api/upload/pdf' : '/api/upload/excel';
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch(endpoint, { method: 'POST', body: formData })
+                .then(async (res) => {
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || 'Error en el servidor');
+                    return data;
+                })
+                .then((data) => {
+                    currentData = { headers: data.headers, rows: data.rows };
+                    renderTable(data.headers, data.rows);
+                    fileName.textContent = data.filename;
+                    rowCount.textContent = `— ${data.row_count} filas`;
+                    result.style.display = 'block';
+                    showLoading(false);
+                })
+                .catch((err) => {
+                    showLoading(false);
+                    showMessage(err.message, 'error');
+                });
+        }
+
+        function renderTable(headers, rows) {
+            let theadHtml = '<tr>';
+            headers.forEach((h) => {
+                theadHtml += `<th>${escapeHtml(h)}</th>`;
+            });
+            theadHtml += '</tr>';
+            tableHead.innerHTML = theadHtml;
+
+            let tbodyHtml = '';
+            rows.forEach((row, ri) => {
+                tbodyHtml += '<tr>';
+                for (let ci = 0; ci < headers.length; ci++) {
+                    const val = row[ci] || '';
+                    tbodyHtml += `<td><input type="text" value="${escapeHtml(val)}" data-row="${ri}" data-col="${ci}"></td>`;
+                }
+                tbodyHtml += '</tr>';
+            });
+            tableBody.innerHTML = tbodyHtml;
+
+            document.querySelectorAll('#tableBody input').forEach((input) => {
+                input.addEventListener('input', (e) => {
+                    const ri = parseInt(e.target.dataset.row);
+                    const ci = parseInt(e.target.dataset.col);
+                    currentData.rows[ri][ci] = e.target.value;
+                });
+            });
+        }
+
+        function download(format, btn) {
+            if (!currentData.headers.length) return;
+            btn.disabled = true;
+            btn.textContent = 'Descargando...';
+
+            fetch(`/api/download/${format}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(currentData),
+            })
+                .then(async (res) => {
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Error al descargar');
+                    }
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `tabla.${format}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(url);
+                })
+                .catch((err) => showMessage(err.message, 'error'))
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = format === 'xlsx' ? 'Descargar XLSX' : format === 'xls' ? 'Descargar XLS' : 'Descargar PDF';
+                });
+        }
+
+        function clearResult() {
+            currentData = { headers: [], rows: [] };
+            result.style.display = 'none';
+            fileInput.value = '';
+            hideMessage();
+        }
+
+        function showLoading(state) {
+            loading.classList.toggle('active', state);
+            uploadZone.style.display = state ? 'none' : 'block';
+        }
+
+        function showMessage(text, type) {
+            message.textContent = text;
+            message.className = `message ${type}`;
+            message.style.display = 'block';
+        }
+
+        function hideMessage() {
+            message.style.display = 'none';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
