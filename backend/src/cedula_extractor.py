@@ -3,10 +3,16 @@ import re
 import numpy as np
 from PIL import Image
 
+from . import ocr_engine as _ocr_engine
 from .ocr_engine import get_text as _ocr_get_text
 
 _CLEAN_RE = re.compile(r"[^A-Za-z0-9ÁÉÍÓÚÑáéíóúñ .():,\-/+&<\n]")
 _MULTI_SPACE = re.compile(r"[ \t]+")
+
+FIELDS = [
+    "numero", "apellidos", "nombres", "fecha_nacimiento", "lugar_nacimiento",
+    "rh", "sexo", "estatura", "fecha_expedicion", "lugar_expedicion",
+]
 
 MONTHS3 = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
 MONTH_FULL = {
@@ -340,13 +346,51 @@ _BARCODE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MRZ_VALUES = {str(d): d for d in range(10)}
+_MRZ_VALUES.update({chr(ord("A") + i): 10 + i for i in range(26)})
+_MRZ_VALUES["<"] = 0
+_MRZ_WEIGHTS = (7, 3, 1)
+
+
+def mrz_check_digit(segment: str) -> str:
+    total = sum(
+        _MRZ_VALUES.get(ch, 0) * _MRZ_WEIGHTS[i % 3]
+        for i, ch in enumerate(segment.upper())
+    )
+    return str(total % 10)
+
+
+def _mrz_doc_number(lines) -> str:
+    for line in lines:
+        clean = re.sub(r"\s", "", line.upper())
+        if "<" not in clean or len(clean) < 16:
+            continue
+        segment = clean[5:14]
+        check = clean[14:15]
+        digits = _clean_num(segment)
+        if not (6 <= len(digits) <= 11):
+            continue
+        if check.isdigit() and mrz_check_digit(segment) == check:
+            return digits
+    return ""
+
 
 def _parse_barcode(text: str) -> dict:
-    result = {"sexo": "", "cedulas": []}
+    result = {"sexo": "", "cedulas": [], "decoded": []}
     for m in _BARCODE_RE.finditer(text):
         result["cedulas"].append(m.group(1))
         result["sexo"] = m.group(2).upper()
     return result
+
+
+def _merge_decoded_barcodes(barcode: dict, payloads) -> None:
+    for payload in payloads or []:
+        for n in re.findall(r"\d{6,18}", payload):
+            barcode.setdefault("decoded", []).append(n)
+        if not barcode.get("sexo"):
+            m = re.search(r"(?:^|[^A-Z])([MF])(?:[^A-Z]|$)", payload.upper())
+            if m:
+                barcode["sexo"] = m.group(1)
 
 
 def _parse_mrz(lines) -> dict:
@@ -384,12 +428,18 @@ def _is_barcode_line(line: str) -> bool:
     return bool(_BARCODE_RE.search(line)) or bool(re.match(r"^[AP][-\s]", line.strip()))
 
 
-def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict) -> str:
+def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict, mrz_doc: str = "") -> str:
     for pat in (r"NUIP\s*[:\-.,]?\s*([\d.,]{6,18})", r"(?:N[UÚ]MERO|No\.?)\s*[:\-.,]?\s*([\d.,]{6,18})"):
         for m in re.finditer(pat, upper, re.I):
             n = _clean_num(m.group(1))
             if _is_valid_cedula(n):
                 return n
+    if _is_valid_cedula(mrz_doc):
+        return mrz_doc
+    for candidate in barcode.get("decoded", []):
+        n = _clean_num(candidate)
+        if _is_valid_cedula(n):
+            return n
     if _is_valid_cedula(mrz.get("cedula")):
         return mrz["cedula"]
     for n in barcode.get("cedulas", []):
@@ -406,14 +456,20 @@ def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict) -> str:
     return ""
 
 
-def parse_cedula_text(text: str) -> dict:
+def parse_cedula_text(text: str, decoded_barcodes=None) -> dict:
     lines = _norm_lines(text)
     upper = " ".join(lines).upper()
     barcode = _parse_barcode(text)
+    _merge_decoded_barcodes(barcode, decoded_barcodes)
     mrz = _parse_mrz(lines)
+    mrz_doc = _mrz_doc_number(lines)
     is_new = ("NUIP" in upper) or ("1CCO" in upper) or ("<<<<<" in upper) or ("NACIONALIDAD" in upper)
 
-    cedula = _extract_cedula(upper, lines, barcode, mrz)
+    cedula = _extract_cedula(upper, lines, barcode, mrz, mrz_doc)
+    if _ocr_engine.active_profile() == "cand" and cedula.startswith("0"):
+        stripped = cedula.lstrip("0")
+        if _is_valid_cedula(stripped):
+            cedula = stripped
     apellidos, nombres = _extract_names(lines, is_new)
     if not apellidos and mrz.get("apellidos"):
         apellidos = mrz["apellidos"]
@@ -445,10 +501,52 @@ def parse_cedula_text(text: str) -> dict:
 
 
 def extract_from_image(pil_image: Image.Image, dpi: int = 200) -> dict:
+    decoded = _decode_barcodes(pil_image)
+    if _ocr_engine.active_profile() == "cand":
+        legacy_text, enhanced_text = _ocr_engine.get_candidate_texts(pil_image)
+        base = parse_cedula_text(legacy_text, decoded_barcodes=decoded)
+        if enhanced_text:
+            extra = parse_cedula_text(enhanced_text, decoded_barcodes=decoded)
+            result = _fuse_fields(base, extra)
+            result["_ocr_full"] = legacy_text + "\n---\n" + enhanced_text
+        else:
+            result = base
+            result["_ocr_full"] = legacy_text
+        result["_ocr_raw"] = legacy_text[:900]
+        return result
     text = _ocr_get_text(pil_image)
-    result = parse_cedula_text(text)
+    result = parse_cedula_text(text, decoded_barcodes=decoded)
     result["_ocr_raw"] = text[:900]
+    result["_ocr_full"] = text
     return result
+
+
+LONGER_PREFERRED_FIELDS = (
+    "apellidos", "nombres", "lugar_nacimiento", "lugar_expedicion",
+)
+
+
+def _decode_barcodes(pil_image: Image.Image) -> list:
+    try:
+        from .image_processor import barcode_values
+        return barcode_values(pil_image)
+    except Exception:
+        return []
+
+
+def _fuse_fields(base: dict, extra: dict) -> dict:
+    """Completa campos vacíos con la segunda pasada y prefiere nombres/lugares más largos."""
+    merged = dict(base)
+    for field in FIELDS:
+        current = (base.get(field) or "").strip()
+        candidate = (extra.get(field) or "").strip()
+        if not candidate:
+            continue
+        if not current:
+            merged[field] = candidate
+        elif field in LONGER_PREFERRED_FIELDS and len(candidate) > len(current) + 2:
+            merged[field] = candidate
+    return merged
 
 
 def extract_from_pdf_page(pil_image: Image.Image, page_num: int, dpi: int = 200) -> dict:

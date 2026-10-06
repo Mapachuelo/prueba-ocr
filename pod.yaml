@@ -10,6 +10,11 @@ spec:
       image: localhost/ocr-backend:latest
       ports:
         - containerPort: 8000
+      env:
+        - name: OCR_PROFILE
+          value: "cand"
+        - name: OCR_DPI
+          value: "200"
       volumeMounts:
         - name: data
           mountPath: /app/data

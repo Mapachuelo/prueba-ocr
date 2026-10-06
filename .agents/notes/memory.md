@@ -1,0 +1,5 @@
+# Memoria del proyecto
+
+- [2026-09-27 17:55] Plan maestro aprobado: 3 modos de OCR (1 local Tesseract mejorado, 2 VLM local llama.cpp con prompt listo, 3 agente como referencia offline) + login/primer-uso y settings cifrados (clave/ruta/URL/modelo) + CSV + comparador en UI + ground truth de 42 páginas. Orden A→B→modo2→agente→verificación Chromium.
+- [2026-09-27 17:55] Decisiones: credenciales se crean en primer uso (scrypt en data/auth.json); solo el panel de configuración pide sesión; cookie HttpOnly firmada 8h; clave de cifrado auto-generada en data/.secret_key; perfil OCR_PROFILE=legacy default hasta que benchmark demuestre mejora; planes se guardarán en future/ (gitignored).
+- [2026-09-27 18:30] Implementado: login primer-uso + settings IA cifrados (Fernet data/.secret_key, ai_settings.enc, auth.json 0600), CSV, modo IA VLM con prompt listo y fallback, comparador UI, perfil OCR cand por defecto (46% vs 39% legacy; ground truth visual de 42 págs en data/ground_truth.* y reportes). Verificado en Chromium con Podman; mock LLM en scripts/mock_llm.py; pendiente modo 2 con llama.cpp real del usuario.

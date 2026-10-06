@@ -15,12 +15,96 @@ header {
     background: #1a1a2e;
     color: #fff;
     padding: 1rem 2rem;
-    text-align: center;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 1rem;
 }
 
 header h1 {
     font-size: 1.25rem;
     font-weight: 600;
+    text-align: center;
+}
+
+.header-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.btn-ghost {
+    background: transparent;
+    color: #e2e8f0;
+    border: 1px solid #475569;
+}
+
+.btn-ghost:hover:not(:disabled) {
+    background: #334155;
+}
+
+.mode-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.mode-row select {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-family: inherit;
+    background: #fff;
+}
+
+.config-panel {
+    display: none;
+}
+
+.config-panel.active {
+    display: block;
+}
+
+.config-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.config-head h2 {
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.75rem;
+}
+
+.form-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    color: #475569;
+}
+
+.form-grid input {
+    padding: 0.5rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-family: inherit;
+}
+
+.form-grid input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background: #f0f7ff;
 }
 
 .container {
