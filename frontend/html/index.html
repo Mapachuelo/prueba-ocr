@@ -7,544 +7,68 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <header>
-        <div></div>
-        <h1>OCR PDF &harr; Excel</h1>
-        <div class="header-actions">
-            <button class="btn btn-ghost" id="configBtn" onclick="toggleConfig()">Configuración IA</button>
-        </div>
-    </header>
-
-    <div class="container">
-        <div id="message" class="message"></div>
-
-        <div class="card">
-            <div class="mode-row">
-                <label for="ocrMode"><strong>Motor OCR</strong></label>
-                <select id="ocrMode">
-                    <option value="local">Local (Tesseract, sin IA)</option>
-                    <option value="ai">IA local (VLM vía llama.cpp)</option>
-                </select>
-                <span class="info-text" id="aiStatus"></span>
+    <div id="loginView" class="login-screen" hidden>
+        <section class="login-brand">
+            <div class="brand-line">
+                <span class="brand-mark">OCR</span>
+                <span class="brand-name">PDF a Excel</span>
             </div>
+            <h1>Extrae datos, revisa con filtros y compara resultados.</h1>
+            <p class="muted-light">OCR local con Tesseract o modelos de visión en llama.cpp. Exporta a Excel, CSV o PDF.</p>
+            <ul class="benefits" id="loginBenefits"></ul>
+        </section>
+        <section class="login-panel">
+            <form id="loginForm" class="login-card">
+                <h2 id="loginTitle">Iniciar sesión</h2>
+                <p id="loginHint" class="muted"></p>
+                <label class="field">Usuario<input id="loginUser" autocomplete="username" required></label>
+                <label class="field">Contraseña<input id="loginPass" type="password" autocomplete="current-password" required></label>
+                <label class="field" id="loginConfirmWrap" hidden>Confirmar contraseña<input id="loginConfirm" type="password" autocomplete="new-password"></label>
+                <label class="checkbox" id="rememberWrap"><input type="checkbox" id="loginRemember" checked> Recordar sesión</label>
+                <button type="submit" class="btn primary block" id="loginSubmit">Entrar</button>
+                <div id="loginError" class="alert error" hidden></div>
+                <p class="login-foot muted">¿Olvidaste la contraseña? Pide al administrador que la restablezca.</p>
+            </form>
+        </section>
+    </div>
 
-            <div class="upload-zone" id="uploadZone">
-                <div class="icon">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                        <polyline points="17 8 12 3 7 8"/>
-                        <line x1="12" y1="3" x2="12" y2="15"/>
-                    </svg>
-                </div>
-                <p><strong>Selecciona o arrastra un archivo</strong></p>
-                <p style="font-size:0.8rem;color:#94a3b8;">PDF, XLSX o XLS</p>
-                <input type="file" id="fileInput" accept=".pdf,.xlsx,.xls">
+    <div id="appView" class="app" hidden>
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-mark small">OCR</span>
+                <span>PDF a Excel</span>
             </div>
-
-            <div class="loading" id="loading">
-                <div class="spinner"></div>
-                <p style="margin-top:0.75rem;">Procesando archivo...</p>
+            <nav class="nav" id="mainNav"></nav>
+            <div class="sidebar-foot">
+                <div class="user-chip">
+                    <span class="avatar" id="userAvatar">U</span>
+                    <span>
+                        <strong id="userName"></strong>
+                        <small id="userRole"></small>
+                    </span>
+                </div>
+                <button class="btn ghost sm block" id="btnPassword">Cambiar contraseña</button>
+                <button class="btn ghost sm block" id="btnLogout">Cerrar sesión</button>
             </div>
-        </div>
-
-        <div class="card config-panel" id="configPanel">
-            <div class="config-head">
-                <h2>Configuración IA local</h2>
-                <button class="btn btn-danger" onclick="toggleConfig(false)">Cerrar</button>
-            </div>
-
-            <div id="authSection">
-                <p class="info-text" id="authHint"></p>
-                <div class="form-grid">
-                    <label>Usuario
-                        <input id="cfgUsername" type="text" autocomplete="username">
-                    </label>
-                    <label>Contraseña
-                        <input id="cfgPassword" type="password" autocomplete="current-password">
-                    </label>
-                    <label id="cfgConfirmWrap" style="display:none">Confirmar contraseña
-                        <input id="cfgConfirm" type="password" autocomplete="new-password">
-                    </label>
-                </div>
-                <div class="actions">
-                    <button class="btn btn-primary" id="authSubmitBtn" onclick="submitAuth()">Iniciar sesión</button>
-                </div>
-                <div class="message" id="authMessage"></div>
-            </div>
-
-            <div id="settingsSection" style="display:none">
-                <p class="info-text">
-                    Se guarda cifrado en el servidor (cifrado en reposo). La clave API nunca se
-                    devuelve; si la dejas vacía se conserva la actual.
-                </p>
-                <div class="form-grid">
-                    <label>Clave API
-                        <input id="cfgApiKey" type="password" autocomplete="new-password" placeholder="•••• (sin cambios)">
-                    </label>
-                    <label>Ruta local del modelo
-                        <input id="cfgLocalPath" type="text" placeholder="/modelos/qwen2.5-vl.gguf">
-                    </label>
-                    <label>URL base (OpenAI-compatible)
-                        <input id="cfgBaseUrl" type="text" placeholder="http://localhost:11434/v1">
-                    </label>
-                    <label>Modelo
-                        <input id="cfgModel" type="text" placeholder="qwen2.5-vl-7b-instruct">
-                    </label>
-                </div>
-                <div class="actions">
-                    <button class="btn btn-success" id="saveSettingsBtn" onclick="saveSettings()">Guardar</button>
-                    <button class="btn btn-danger" onclick="deleteSettings()">Borrar configuración</button>
-                    <button class="btn btn-warning" onclick="logout()">Cerrar sesión</button>
-                </div>
-                <div class="message" id="settingsMessage"></div>
-            </div>
-        </div>
-
-        <div id="result">
-            <div class="card">
-                <div class="table-info">
-                    <div>
-                        <strong id="fileName"></strong>
-                        <span class="info-text" id="rowCount"></span>
-                    </div>
-                    <button class="btn btn-danger" id="clearBtn" onclick="clearResult()">
-                        Limpiar
-                    </button>
-                </div>
-
-                <div class="table-wrapper">
-                    <table id="dataTable">
-                        <thead id="tableHead"></thead>
-                        <tbody id="tableBody"></tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="actions">
-                    <button class="btn btn-success" onclick="download('xlsx', this)">
-                        Descargar XLSX
-                    </button>
-                    <button class="btn btn-warning" onclick="download('xls', this)">
-                        Descargar XLS
-                    </button>
-                    <button class="btn btn-primary" onclick="download('csv', this)">
-                        Descargar CSV
-                    </button>
-                    <button class="btn btn-primary" onclick="download('pdf', this)">
-                        Descargar PDF
-                    </button>
-                    <button class="btn btn-success" id="compareBtn" style="display:none" onclick="compareModes(this)">
-                        Comparar modos
-                    </button>
-                </div>
-                <p class="info-text" id="modeNote"></p>
-            </div>
-        </div>
-
-        <div class="card" id="compareCard" style="display:none">
-            <div class="table-info">
+        </aside>
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <div class="app-main">
+            <header class="topbar">
+                <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menú"></button>
                 <div>
-                    <strong>Comparación de modos</strong>
-                    <span class="info-text" id="compareSummary"></span>
+                    <h1 id="pageTitle">Inicio</h1>
+                    <p class="muted" id="pageSubtitle"></p>
                 </div>
-                <button class="btn btn-danger" onclick="hideCompare()">Cerrar</button>
-            </div>
-            <div class="table-wrapper">
-                <table id="compareTable">
-                    <thead>
-                        <tr><th>Página</th><th>Campo</th><th>Local</th><th>IA local</th></tr>
-                    </thead>
-                    <tbody id="compareBody"></tbody>
-                </table>
-            </div>
+                <div class="topbar-actions">
+                    <span class="badge-soft" id="topUser"></span>
+                </div>
+            </header>
+            <main class="content" id="content"></main>
         </div>
     </div>
 
-    <footer>OCR PDF a Excel &mdash; Prueba de concepto</footer>
-
-    <script>
-        const uploadZone = document.getElementById('uploadZone');
-        const fileInput = document.getElementById('fileInput');
-        const loading = document.getElementById('loading');
-        const message = document.getElementById('message');
-        const result = document.getElementById('result');
-        const fileName = document.getElementById('fileName');
-        const rowCount = document.getElementById('rowCount');
-        const tableHead = document.getElementById('tableHead');
-        const tableBody = document.getElementById('tableBody');
-        const ocrMode = document.getElementById('ocrMode');
-        const aiStatus = document.getElementById('aiStatus');
-        const modeNote = document.getElementById('modeNote');
-        const compareBtn = document.getElementById('compareBtn');
-        const compareCard = document.getElementById('compareCard');
-        const compareBody = document.getElementById('compareBody');
-        const compareSummary = document.getElementById('compareSummary');
-        const configPanel = document.getElementById('configPanel');
-        const authSection = document.getElementById('authSection');
-        const settingsSection = document.getElementById('settingsSection');
-        const authHint = document.getElementById('authHint');
-        const authSubmitBtn = document.getElementById('authSubmitBtn');
-        const cfgConfirmWrap = document.getElementById('cfgConfirmWrap');
-        const authMessage = document.getElementById('authMessage');
-        const settingsMessage = document.getElementById('settingsMessage');
-
-        let currentData = { headers: [], rows: [] };
-        let currentFile = null;
-        let isSetup = false;
-        let authenticated = false;
-        const modeResults = {};
-
-        uploadZone.addEventListener('click', () => fileInput.click());
-
-        uploadZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadZone.classList.add('dragover');
-        });
-
-        uploadZone.addEventListener('dragleave', () => {
-            uploadZone.classList.remove('dragover');
-        });
-
-        uploadZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadZone.classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length) handleFile(files[0]);
-        });
-
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length) handleFile(fileInput.files[0]);
-        });
-
-        ocrMode.addEventListener('change', refreshAiStatus);
-
-        async function api(url, options = {}) {
-            const res = await fetch(url, options);
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || 'Error en el servidor');
-            return data;
-        }
-
-        function handleFile(file) {
-            const ext = file.name.split('.').pop().toLowerCase();
-            if (!['pdf', 'xlsx', 'xls'].includes(ext)) {
-                showMessage('Formato no soportado. Usa PDF, XLSX o XLS.', 'error');
-                return;
-            }
-            currentFile = file;
-            runUpload(file, ocrMode.value);
-        }
-
-        async function runUpload(file, mode) {
-            showLoading(true);
-            hideMessage();
-
-            const endpoint = file.name.split('.').pop().toLowerCase() === 'pdf'
-                ? '/api/upload/pdf' : '/api/upload/excel';
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('mode', mode);
-
-            try {
-                const data = await api(endpoint, { method: 'POST', body: formData });
-                modeResults[mode] = data;
-                currentData = { headers: data.headers, rows: data.rows };
-                renderTable(data.headers, data.rows);
-                fileName.textContent = data.filename;
-                rowCount.textContent = `— ${data.row_count} filas`;
-                modeNote.textContent = data.ai && data.ai.used
-                    ? `Procesado con IA local (${data.ai.model || 'modelo'})`
-                    : (mode === 'ai' ? 'IA local no disponible: se usó el motor local.' : '');
-                result.style.display = 'block';
-                updateCompareBtn();
-                showLoading(false);
-            } catch (err) {
-                showLoading(false);
-                showMessage(err.message, 'error');
-            }
-        }
-
-        function updateCompareBtn() {
-            compareBtn.style.display = (modeResults.local && modeResults.ai) ? 'inline-flex' : 'none';
-        }
-
-        function normalizeCell(value) {
-            return (value || '').toString().trim().toUpperCase()
-                .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        }
-
-        function compareModes(btn) {
-            const local = modeResults.local;
-            const ai = modeResults.ai;
-            if (!local || !ai) return;
-
-            const headers = local.headers;
-            const diffs = [];
-            let total = 0;
-            let same = 0;
-            const n = Math.min(local.rows.length, ai.rows.length);
-            for (let r = 0; r < n; r++) {
-                for (let c = 0; c < headers.length; c++) {
-                    if (headers[c] === 'OCR_Raw') continue;
-                    total++;
-                    const va = local.rows[r][c] || '';
-                    const vb = ai.rows[r][c] || '';
-                    if (normalizeCell(va) === normalizeCell(vb)) {
-                        same++;
-                    } else {
-                        diffs.push([local.rows[r][0] || String(r + 1), headers[c], va, vb]);
-                    }
-                }
-            }
-
-            compareSummary.textContent = `— ${same}/${total} celdas iguales (${total ? Math.round(same * 100 / total) : 0}%)`;
-            let html = '';
-            diffs.slice(0, 500).forEach(([page, field, va, vb]) => {
-                html += `<tr><td>${escapeHtml(page)}</td><td>${escapeHtml(field)}</td>` +
-                    `<td>${escapeHtml(va)}</td><td>${escapeHtml(vb)}</td></tr>`;
-            });
-            if (!diffs.length) {
-                html = '<tr><td colspan="4">Sin diferencias entre modos.</td></tr>';
-            }
-            compareBody.innerHTML = html;
-            compareCard.style.display = 'block';
-            compareCard.scrollIntoView({ behavior: 'smooth' });
-        }
-
-        function hideCompare() {
-            compareCard.style.display = 'none';
-        }
-
-        function renderTable(headers, rows) {
-            let theadHtml = '<tr>';
-            headers.forEach((h) => {
-                theadHtml += `<th>${escapeHtml(h)}</th>`;
-            });
-            theadHtml += '</tr>';
-            tableHead.innerHTML = theadHtml;
-
-            let tbodyHtml = '';
-            rows.forEach((row, ri) => {
-                tbodyHtml += '<tr>';
-                for (let ci = 0; ci < headers.length; ci++) {
-                    const val = row[ci] || '';
-                    tbodyHtml += `<td><input type="text" value="${escapeHtml(val)}" data-row="${ri}" data-col="${ci}"></td>`;
-                }
-                tbodyHtml += '</tr>';
-            });
-            tableBody.innerHTML = tbodyHtml;
-
-            document.querySelectorAll('#tableBody input').forEach((input) => {
-                input.addEventListener('input', (e) => {
-                    const ri = parseInt(e.target.dataset.row);
-                    const ci = parseInt(e.target.dataset.col);
-                    currentData.rows[ri][ci] = e.target.value;
-                });
-            });
-        }
-
-        function download(format, btn) {
-            if (!currentData.headers.length) return;
-            btn.disabled = true;
-            btn.textContent = 'Descargando...';
-
-            fetch(`/api/download/${format}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(currentData),
-            })
-                .then(async (res) => {
-                    if (!res.ok) {
-                        const err = await res.json();
-                        throw new Error(err.detail || 'Error al descargar');
-                    }
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `tabla.${format}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    URL.revokeObjectURL(url);
-                })
-                .catch((err) => showMessage(err.message, 'error'))
-                .finally(() => {
-                    btn.disabled = false;
-                    const labels = { xlsx: 'Descargar XLSX', xls: 'Descargar XLS', csv: 'Descargar CSV', pdf: 'Descargar PDF' };
-                    btn.textContent = labels[format] || format;
-                });
-        }
-
-        function clearResult() {
-            currentData = { headers: [], rows: [] };
-            currentFile = null;
-            modeResults.local = null;
-            modeResults.ai = null;
-            result.style.display = 'none';
-            compareCard.style.display = 'none';
-            updateCompareBtn();
-            fileInput.value = '';
-            modeNote.textContent = '';
-            hideMessage();
-        }
-
-        function showLoading(state) {
-            loading.classList.toggle('active', state);
-            uploadZone.style.display = state ? 'none' : 'block';
-        }
-
-        function showMessage(text, type) {
-            message.textContent = text;
-            message.className = `message ${type}`;
-            message.style.display = 'block';
-        }
-
-        function hideMessage() {
-            message.style.display = 'none';
-        }
-
-        function escapeHtml(str) {
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
-        }
-
-        async function refreshAiStatus() {
-            if (ocrMode.value !== 'ai') {
-                aiStatus.textContent = '';
-                return;
-            }
-            try {
-                const health = await api('/api/health/ai');
-                aiStatus.textContent = health.reachable
-                    ? `IA local disponible (${health.model || 'modelo'})`
-                    : 'IA local no disponible: se usará el motor local';
-            } catch (err) {
-                aiStatus.textContent = 'IA local no disponible';
-            }
-        }
-
-        function toggleConfig(force) {
-            const show = typeof force === 'boolean' ? force : !configPanel.classList.contains('active');
-            configPanel.classList.toggle('active', show);
-            if (show) loadAuthStatus();
-        }
-
-        async function loadAuthStatus() {
-            try {
-                const status = await api('/api/auth/status');
-                isSetup = status.setup;
-                authenticated = status.authenticated;
-            } catch (err) {
-                isSetup = false;
-                authenticated = false;
-            }
-            if (authenticated) {
-                authSection.style.display = 'none';
-                settingsSection.style.display = 'block';
-                await loadSettings();
-            } else {
-                authSection.style.display = 'block';
-                settingsSection.style.display = 'none';
-                authHint.textContent = isSetup
-                    ? 'Inicia sesión para editar la configuración IA.'
-                    : 'Primer uso: crea el usuario y la contraseña del panel.';
-                authSubmitBtn.textContent = isSetup ? 'Iniciar sesión' : 'Crear credenciales';
-                cfgConfirmWrap.style.display = isSetup ? 'none' : 'block';
-            }
-        }
-
-        async function submitAuth() {
-            const username = document.getElementById('cfgUsername').value.trim();
-            const password = document.getElementById('cfgPassword').value;
-            const confirm = document.getElementById('cfgConfirm').value;
-            authMessage.className = 'message';
-            authMessage.style.display = 'none';
-
-            if (!isSetup && password !== confirm) {
-                authMessage.textContent = 'Las contraseñas no coinciden';
-                authMessage.className = 'message error';
-                return;
-            }
-            try {
-                const endpoint = isSetup ? '/api/auth/login' : '/api/auth/setup';
-                await api(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password }),
-                });
-                document.getElementById('cfgPassword').value = '';
-                document.getElementById('cfgConfirm').value = '';
-                await loadAuthStatus();
-            } catch (err) {
-                authMessage.textContent = err.message;
-                authMessage.className = 'message error';
-            }
-        }
-
-        async function loadSettings() {
-            try {
-                const data = await api('/api/settings/ai');
-                document.getElementById('cfgApiKey').value = '';
-                document.getElementById('cfgApiKey').placeholder = data.configured && data.api_key_masked
-                    ? data.api_key_masked : '•••• (sin cambios)';
-                document.getElementById('cfgLocalPath').value = data.local_path || '';
-                document.getElementById('cfgBaseUrl').value = data.base_url || '';
-                document.getElementById('cfgModel').value = data.model || '';
-            } catch (err) {
-                settingsMessage.textContent = err.message;
-                settingsMessage.className = 'message error';
-            }
-        }
-
-        async function saveSettings() {
-            settingsMessage.className = 'message';
-            settingsMessage.style.display = 'none';
-            try {
-                await api('/api/settings/ai', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        api_key: document.getElementById('cfgApiKey').value,
-                        local_path: document.getElementById('cfgLocalPath').value,
-                        base_url: document.getElementById('cfgBaseUrl').value,
-                        model: document.getElementById('cfgModel').value,
-                    }),
-                });
-                settingsMessage.textContent = 'Guardado y cifrado correctamente';
-                settingsMessage.className = 'message success';
-                await loadSettings();
-            } catch (err) {
-                settingsMessage.textContent = err.message;
-                settingsMessage.className = 'message error';
-            }
-        }
-
-        async function deleteSettings() {
-            if (!confirm('¿Borrar la configuración IA guardada?')) return;
-            try {
-                await api('/api/settings/ai', { method: 'DELETE' });
-                settingsMessage.textContent = 'Configuración eliminada';
-                settingsMessage.className = 'message success';
-                await loadSettings();
-            } catch (err) {
-                settingsMessage.textContent = err.message;
-                settingsMessage.className = 'message error';
-            }
-        }
-
-        async function logout() {
-            try {
-                await api('/api/auth/logout', { method: 'POST' });
-            } catch (err) {
-                /* ignora */
-            }
-            document.getElementById('cfgUsername').value = '';
-            document.getElementById('cfgPassword').value = '';
-            await loadAuthStatus();
-        }
-    </script>
+    <div class="toasts" id="toasts"></div>
+    <div id="modalRoot"></div>
+    <script type="module" src="app.js"></script>
 </body>
 </html>

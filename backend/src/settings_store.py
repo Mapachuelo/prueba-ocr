@@ -69,6 +69,7 @@ class SettingsStore:
         if not data:
             return {
                 "configured": False,
+                "provider": "local",
                 "api_key_masked": "",
                 "local_path": "",
                 "base_url": "",
@@ -77,6 +78,7 @@ class SettingsStore:
             }
         return {
             "configured": True,
+            "provider": data.get("provider", "local"),
             "api_key_masked": self.mask_key(data.get("api_key", "")),
             "local_path": data.get("local_path", ""),
             "base_url": data.get("base_url", ""),

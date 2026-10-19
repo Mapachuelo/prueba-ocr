@@ -15,6 +15,12 @@ def active_profile() -> str:
     return _PROFILE
 
 
+def set_profile(name: str) -> None:
+    global _PROFILE
+    if name in ("legacy", "cand"):
+        _PROFILE = name
+
+
 def _preprocess(pil_image: Image.Image) -> Image.Image:
     img = pil_image.convert("L")
     w, h = img.size

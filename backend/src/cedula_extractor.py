@@ -428,23 +428,29 @@ def _is_barcode_line(line: str) -> bool:
     return bool(_BARCODE_RE.search(line)) or bool(re.match(r"^[AP][-\s]", line.strip()))
 
 
-def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict, mrz_doc: str = "") -> str:
+def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict, mrz_doc: str = "", sources: dict = None) -> str:
+    sources = sources if sources is not None else {}
     for pat in (r"NUIP\s*[:\-.,]?\s*([\d.,]{6,18})", r"(?:N[UÚ]MERO|No\.?)\s*[:\-.,]?\s*([\d.,]{6,18})"):
         for m in re.finditer(pat, upper, re.I):
             n = _clean_num(m.group(1))
             if _is_valid_cedula(n):
+                sources["numero"] = "regex"
                 return n
     if _is_valid_cedula(mrz_doc):
+        sources["numero"] = "mrz"
         return mrz_doc
     for candidate in barcode.get("decoded", []):
         n = _clean_num(candidate)
         if _is_valid_cedula(n):
+            sources["numero"] = "barcode"
             return n
     if _is_valid_cedula(mrz.get("cedula")):
+        sources["numero"] = "mrz"
         return mrz["cedula"]
     for n in barcode.get("cedulas", []):
         n = _clean_num(n)
         if _is_valid_cedula(n):
+            sources["numero"] = "barcode"
             return n
     for line in lines:
         if _is_barcode_line(line):
@@ -452,6 +458,7 @@ def _extract_cedula(upper: str, lines, barcode: dict, mrz: dict, mrz_doc: str = 
         for n in sorted(set(re.findall(r"\d[\d.,]{5,14}", line)), key=len, reverse=True):
             n = _clean_num(n)
             if _is_valid_cedula(n):
+                sources["numero"] = "regex"
                 return n
     return ""
 
@@ -465,7 +472,8 @@ def parse_cedula_text(text: str, decoded_barcodes=None) -> dict:
     mrz_doc = _mrz_doc_number(lines)
     is_new = ("NUIP" in upper) or ("1CCO" in upper) or ("<<<<<" in upper) or ("NACIONALIDAD" in upper)
 
-    cedula = _extract_cedula(upper, lines, barcode, mrz, mrz_doc)
+    sources = {field: "regex" for field in FIELDS}
+    cedula = _extract_cedula(upper, lines, barcode, mrz, mrz_doc, sources)
     if _ocr_engine.active_profile() == "cand" and cedula.startswith("0"):
         stripped = cedula.lstrip("0")
         if _is_valid_cedula(stripped):
@@ -473,17 +481,24 @@ def parse_cedula_text(text: str, decoded_barcodes=None) -> dict:
     apellidos, nombres = _extract_names(lines, is_new)
     if not apellidos and mrz.get("apellidos"):
         apellidos = mrz["apellidos"]
+        sources["apellidos"] = "mrz"
     if not nombres and mrz.get("nombres"):
         nombres = mrz["nombres"]
+        sources["nombres"] = "mrz"
 
     fecha_nac = _extract_fecha_nac(lines)
     if not fecha_nac and mrz.get("fecha_nac"):
         fecha_nac = mrz["fecha_nac"]
+        sources["fecha_nacimiento"] = "mrz"
 
     lugar_nac = _extract_lugar(lines, is_new)
     rh = _extract_rh(lines)
     est = _extract_estatura(lines, is_new, upper)
     sexo = _extract_sexo(upper, barcode.get("sexo", ""), mrz.get("sexo", ""))
+    if barcode.get("sexo"):
+        sources["sexo"] = "barcode"
+    elif mrz.get("sexo"):
+        sources["sexo"] = "mrz"
     fecha_exp, lugar_exp = _extract_expedicion(lines, is_new)
 
     return {
@@ -497,6 +512,7 @@ def parse_cedula_text(text: str, decoded_barcodes=None) -> dict:
         "estatura": est,
         "fecha_expedicion": fecha_exp,
         "lugar_expedicion": lugar_exp,
+        "_field_sources": sources,
     }
 
 
@@ -537,6 +553,8 @@ def _decode_barcodes(pil_image: Image.Image) -> list:
 def _fuse_fields(base: dict, extra: dict) -> dict:
     """Completa campos vacíos con la segunda pasada y prefiere nombres/lugares más largos."""
     merged = dict(base)
+    sources = dict(base.get("_field_sources") or {})
+    extra_sources = extra.get("_field_sources") or {}
     for field in FIELDS:
         current = (base.get(field) or "").strip()
         candidate = (extra.get(field) or "").strip()
@@ -544,8 +562,11 @@ def _fuse_fields(base: dict, extra: dict) -> dict:
             continue
         if not current:
             merged[field] = candidate
+            sources[field] = extra_sources.get(field, "regex")
         elif field in LONGER_PREFERRED_FIELDS and len(candidate) > len(current) + 2:
             merged[field] = candidate
+            sources[field] = extra_sources.get(field, "regex")
+    merged["_field_sources"] = sources
     return merged
 
 
