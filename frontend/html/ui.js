@@ -53,6 +53,24 @@ export function modal(title, content, actions = [], onClose = null) {
     return { close, body };
 }
 
+export function actionMenu(items, label = 'Más acciones') {
+    return h('button', {
+        class: 'btn outline sm menu-toggle',
+        title: label,
+        'aria-label': label,
+        onclick: (event) => {
+            event.stopPropagation();
+            modal(label, h('p', { class: 'muted' }, 'Elige una acción para este elemento.'), items
+                .filter(Boolean)
+                .map((item) => ({
+                    label: item.label,
+                    class: item.danger ? 'danger' : 'outline',
+                    onClick: (close) => { close(); item.onClick(); },
+                })));
+        },
+    }, '⋯');
+}
+
 export function confirmDialog(message) {
     return new Promise((resolve) => {
         let answered = false;

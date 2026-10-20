@@ -12,13 +12,13 @@ const SOURCE_OPTIONS = [
 const COMPLETENESS_OPTIONS = [
     ['', 'Todos'], ['complete', 'Completos'], ['partial', 'Parciales'], ['incomplete', 'Incompletos'],
 ];
-const DEFAULT_COLUMNS = ['numero', 'apellidos', 'nombres', 'fecha_nacimiento', 'lugar_nacimiento', 'rh', 'sexo'];
+const DEFAULT_COLUMNS = ['numero', 'apellidos', 'nombres', 'fecha_nacimiento', 'rh', 'sexo'];
 
 export function render(container, { user, params, navigate }) {
     const state = {
         jobId: params.job || null,
         page: 1,
-        size: 25,
+        size: window.matchMedia('(max-width: 820px)').matches ? 10 : 25,
         sort: 'pagina',
         dir: 'asc',
         filters: {},
@@ -65,14 +65,11 @@ export function render(container, { user, params, navigate }) {
         h('button', { class: 'btn outline sm', onclick: clearFilters }, 'Limpiar'),
     ));
 
-    const toolbar = h('div', { class: 'btn-row', style: 'margin-top:1rem' },
-        h('div', { style: 'flex:1 1 260px' }, searchInput),
+    const toolbar = h('div', { class: 'btn-row toolbar' },
+        h('div', { class: 'toolbar-search' }, searchInput),
         h('button', { class: 'btn outline', onclick: () => { filtersPanel.hidden = !filtersPanel.hidden; } }, icon('filter'), 'Filtros'),
         h('button', { class: 'btn outline', onclick: openColumnSelector }, icon('columns'), 'Columnas'),
-        h('button', { class: 'btn outline sm', onclick: () => exportResults('xlsx') }, 'XLSX'),
-        h('button', { class: 'btn outline sm', onclick: () => exportResults('xls') }, 'XLS'),
-        h('button', { class: 'btn outline sm', onclick: () => exportResults('csv') }, 'CSV'),
-        h('button', { class: 'btn outline sm', onclick: () => exportResults('pdf') }, 'PDF'),
+        h('button', { class: 'btn outline', onclick: openExportDialog }, icon('download'), 'Exportar'),
     );
     searchInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') applyFilters(); });
     searchInput.addEventListener('search', applyFilters);
@@ -202,7 +199,7 @@ export function render(container, { user, params, navigate }) {
     function visibleColumns(data) {
         if (!state.visible) {
             try {
-                const stored = JSON.parse(localStorage.getItem('ocr.visibleColumns') || 'null');
+                const stored = JSON.parse(localStorage.getItem('ocr.visibleColumns.v2') || 'null');
                 if (Array.isArray(stored)) state.visible = stored.filter((key) => data.columns.some((column) => column.key === key));
             } catch (error) { state.visible = null; }
             if (!state.visible || !state.visible.length) state.visible = defaultColumns(data.columns);
@@ -272,7 +269,7 @@ export function render(container, { user, params, navigate }) {
             headRow.append(h('th', { class: 'sortable', onclick: () => sortBy(column.key) },
                 column.label, sortMark(column.key)));
         }
-        if (isCedula) headRow.append(h('th', {}, 'Estado'), h('th', {}, 'Origen'));
+        if (isCedula) headRow.append(h('th', {}, 'Calidad'));
         table.append(h('thead', {}, headRow));
 
         const tbody = h('tbody', {});
@@ -296,14 +293,19 @@ export function render(container, { user, params, navigate }) {
                 if (column.key === 'OCR_Raw') {
                     tr.append(h('td', { title: value }, truncate(value, 60)));
                 } else {
-                    tr.append(h('td', {}, value || h('em', {}, '—'), sourceDot(source)));
+                    tr.append(h('td', {},
+                        h('span', { class: 'cell-source' },
+                            h('span', {}, value || h('em', {}, '—')),
+                            sourceDot(source)),
+                    ));
                 }
             }
             if (isCedula) {
-                tr.append(
-                    h('td', {}, completenessBadge(row.values)),
-                    h('td', {}, sourceDot(dominantSource(row)), sourceLabel(dominantSource(row))),
-                );
+                const dominant = dominantSource(row);
+                tr.append(h('td', { class: 'quality-cell' },
+                    completenessBadge(row.values),
+                    h('span', { class: 'source-inline' }, sourceDot(dominant), sourceLabel(dominant)),
+                ));
             }
             tbody.append(tr);
         }
@@ -425,7 +427,7 @@ export function render(container, { user, params, navigate }) {
                 h('span', { class: 'muted' }, `${state.selected.size} seleccionadas`),
                 h('select', {
                     onchange: (event) => { state.size = Number(event.target.value); state.page = 1; load(); },
-                }, ...[25, 50, 100, 200].map((size) => h('option', { value: size, selected: size === state.size }, `${size} por página`))),
+                }, ...[10, 25, 50, 100, 200].map((size) => h('option', { value: size, selected: size === state.size }, `${size} por página`))),
             ),
         );
     }
@@ -451,11 +453,34 @@ export function render(container, { user, params, navigate }) {
             onClick: (close) => {
                 if (!selected.size) { toast('Elige al menos una columna', 'warning'); return; }
                 state.visible = [...selected];
-                localStorage.setItem('ocr.visibleColumns', JSON.stringify(state.visible));
+                localStorage.setItem('ocr.visibleColumns.v2', JSON.stringify(state.visible));
                 close();
                 renderTable(state.data);
             },
         }]);
+    }
+
+    function openExportDialog() {
+        const formats = [
+            ['xlsx', 'Excel moderno (.xlsx)'],
+            ['xls', 'Excel clásico (.xls)'],
+            ['csv', 'CSV (.csv)'],
+            ['pdf', 'PDF (.pdf)'],
+        ];
+        const body = h('div', { class: 'stack' },
+            h('p', { class: 'muted' }, state.selected.size
+                ? `Se exportarán las ${state.selected.size} páginas seleccionadas.`
+                : 'Se exportarán todas las filas que cumplen los filtros actuales.'),
+            ...formats.map(([fmt, label]) => h('button', {
+                class: 'btn outline block',
+                onclick: (event) => {
+                    const dialog = event.target.closest('.modal-backdrop');
+                    if (dialog) dialog.remove();
+                    exportResults(fmt);
+                },
+            }, label)),
+        );
+        modal('Exportar resultados', body);
     }
 
     async function exportResults(fmt) {

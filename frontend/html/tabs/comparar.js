@@ -154,12 +154,27 @@ export function render(container, { params, navigate }) {
             ));
         }
         table.append(tbody);
+        const cards = h('div', { class: 'mobile-cards' });
+        for (const diff of data.diffs.slice(0, 500)) {
+            cards.append(h('div', { class: 'mobile-card' },
+                h('div', { class: 'mc-head' },
+                    h('strong', {}, `Página ${diff.page}`),
+                    h('span', { class: 'muted' }, FIELD_LABELS[diff.field] || diff.field),
+                ),
+                h('div', { class: 'mc-row' }, h('span', {}, 'A'), h('span', {}, diff.a || 'vacío')),
+                h('div', { class: 'mc-row' }, h('span', {}, 'B'), h('span', {}, diff.b || 'vacío')),
+                h('div', { class: 'btn-row', style: 'margin-top:0.7rem' },
+                    h('button', { class: 'btn outline sm', onclick: () => useValue(diff) }, 'Usar B'),
+                ),
+            ));
+        }
         diffBox.append(
             h('div', { class: 'card-head', style: 'margin-top:1.2rem' },
                 h('h3', {}, `Diferencias (${data.diffs.length})`),
                 h('span', { class: 'muted' }, 'Máximo 500 filas en pantalla'),
             ),
-            h('div', { class: 'table-wrap' }, table),
+            h('div', { class: 'table-wrap desktop-table' }, table),
+            cards,
         );
     }
 

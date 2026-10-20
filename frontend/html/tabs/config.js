@@ -279,23 +279,68 @@ export function render(container, { user }) {
     async function loadUsers() {
         const data = await api('/api/users');
         clear(usersHolder);
+        const activeAdmins = data.items.filter((item) => item.role === 'admin' && item.active).length;
         for (const item of data.items) {
-            const role = h('select', {
-                onchange: () => api(`/api/users/${item.id}`, { method: 'PATCH', body: { role: role.value } })
-                    .then(() => toast('Rol actualizado', 'success'))
-                    .catch((error) => toast(error.message, 'error')),
-            });
-            for (const value of ['admin', 'usuario']) {
-                role.append(h('option', { value, selected: value === item.role }, value));
+            const isSelf = item.username === user.username;
+            const previousRole = item.role;
+            const role = h('select', { disabled: isSelf, title: isSelf ? 'No puedes cambiar el rol de tu propia cuenta' : '' });
+            for (const [value, label] of [['admin', 'Administrador'], ['usuario', 'Usuario']]) {
+                role.append(h('option', { value, selected: value === item.role }, label));
             }
-            const active = h('input', {
-                type: 'checkbox', checked: item.active,
-                onchange: () => api(`/api/users/${item.id}`, { method: 'PATCH', body: { active: active.checked } })
-                    .then(() => toast('Usuario actualizado', 'success'))
-                    .catch((error) => { toast(error.message, 'error'); active.checked = !active.checked; }),
+            role.addEventListener('change', async () => {
+                const nextRole = role.value;
+                if (nextRole === previousRole) return;
+                const oldLabel = previousRole === 'admin' ? 'Administrador' : 'Usuario';
+                const newLabel = nextRole === 'admin' ? 'Administrador' : 'Usuario';
+                const ok = await confirmDialog(
+                    `¿Cambiar el rol de “${item.username}” de ${oldLabel} a ${newLabel}?`,
+                );
+                if (!ok) {
+                    role.value = previousRole;
+                    return;
+                }
+                role.disabled = true;
+                try {
+                    await api(`/api/users/${item.id}`, { method: 'PATCH', body: { role: nextRole } });
+                    toast('Rol actualizado', 'success');
+                    await loadUsers();
+                } catch (error) {
+                    role.value = previousRole;
+                    toast(error.message, 'error');
+                } finally {
+                    role.disabled = false;
+                }
             });
+
+            const active = h('input', {
+                type: 'checkbox', checked: item.active, disabled: isSelf,
+                title: isSelf ? 'No puedes desactivar tu propia cuenta' : '',
+            });
+            active.addEventListener('change', async () => {
+                if (item.active && active.checked === false) {
+                    const ok = await confirmDialog(
+                        `¿Desactivar a “${item.username}”? No podrá iniciar sesión hasta que lo reactives.`,
+                    );
+                    if (!ok) {
+                        active.checked = true;
+                        return;
+                    }
+                }
+                active.disabled = true;
+                try {
+                    await api(`/api/users/${item.id}`, { method: 'PATCH', body: { active: active.checked } });
+                    toast(active.checked ? 'Usuario activado' : 'Usuario desactivado', 'success');
+                    await loadUsers();
+                } catch (error) {
+                    active.checked = item.active;
+                    toast(error.message, 'error');
+                } finally {
+                    active.disabled = false;
+                }
+            });
+
             const actions = h('div', { class: 'btn-row' });
-            if (item.username !== user.username) {
+            if (!isSelf) {
                 actions.append(
                     h('button', { class: 'btn outline sm', onclick: () => resetPassword(item) }, 'Reset clave'),
                     h('button', {
@@ -314,8 +359,12 @@ export function render(container, { user }) {
                 actions.append(h('span', { class: 'muted' }, 'Tu cuenta'));
             }
             usersHolder.append(h('div', { class: 'user-row' },
-                h('div', { class: 'grow' }, h('strong', {}, item.username),
-                    h('div', { class: 'muted' }, `Creado ${item.created_at ? fmtDate(item.created_at) : '—'}`)),
+                h('div', { class: 'grow' },
+                    h('strong', {}, item.username),
+                    h('div', { class: 'muted' },
+                        `Creado ${item.created_at ? fmtDate(item.created_at) : '—'}`,
+                        item.role === 'admin' && item.active && activeAdmins === 1
+                            ? ' · Último administrador activo' : '')),
                 h('div', { class: 'role-select' }, role),
                 h('label', { class: 'active-toggle' }, active, 'Activo'),
                 actions,

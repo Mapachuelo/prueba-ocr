@@ -147,37 +147,63 @@ def list_users() -> list:
     )
 
 
+LAST_ADMIN_MESSAGE = "Debe existir al menos un administrador activo"
+
+
 def update_user(user_id: int, role=None, active=None, password=None) -> None:
-    user = db.query_one("SELECT * FROM users WHERE id=?", (user_id,))
-    if not user:
-        raise HTTPException(404, "Usuario no encontrado")
-    if role is not None:
-        if role not in ROLES:
-            raise HTTPException(400, "Rol no válido")
-        db.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
-    if active is not None:
-        db.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, user_id))
-        if not active:
-            db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-    if password:
-        if len(password) < PASSWORD_MIN_LENGTH:
-            raise HTTPException(400, f"La contraseña debe tener al menos {PASSWORD_MIN_LENGTH} caracteres")
-        salt = secrets.token_bytes(16)
-        db.execute(
-            "UPDATE users SET password_hash=?, salt=? WHERE id=?",
-            (_hash(password, salt).hex(), salt.hex(), user_id),
+    if role is not None and role not in ROLES:
+        raise HTTPException(400, "Rol no válido")
+    if password and len(password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(400, f"La contraseña debe tener al menos {PASSWORD_MIN_LENGTH} caracteres")
+
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Usuario no encontrado")
+        user = dict(row)
+        next_role = role if role is not None else user["role"]
+        next_active = bool(active) if active is not None else bool(user["active"])
+        removes_admin = (
+            user["role"] == "admin" and user["active"]
+            and (next_role != "admin" or not next_active)
         )
-        db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        if removes_admin:
+            others = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1 AND id<>?",
+                (user_id,),
+            ).fetchone()["c"]
+            if not others:
+                raise HTTPException(400, LAST_ADMIN_MESSAGE)
+
+        if role is not None:
+            conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+        if active is not None:
+            conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, user_id))
+            if not active:
+                conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        if password:
+            salt = secrets.token_bytes(16)
+            conn.execute(
+                "UPDATE users SET password_hash=?, salt=? WHERE id=?",
+                (_hash(password, salt).hex(), salt.hex(), user_id),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
 
 
 def delete_user(user_id: int) -> None:
-    admins = db.query("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1")
-    user = db.query_one("SELECT * FROM users WHERE id=?", (user_id,))
-    if not user:
-        raise HTTPException(404, "Usuario no encontrado")
-    if user["role"] == "admin" and admins and admins[0]["c"] <= 1:
-        raise HTTPException(400, "No se puede eliminar el último administrador")
-    db.execute("DELETE FROM users WHERE id=?", (user_id,))
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Usuario no encontrado")
+        user = dict(row)
+        if user["role"] == "admin" and user["active"]:
+            others = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1 AND id<>?",
+                (user_id,),
+            ).fetchone()["c"]
+            if not others:
+                raise HTTPException(400, LAST_ADMIN_MESSAGE)
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 
 def verify_credentials(username: str, password: str):

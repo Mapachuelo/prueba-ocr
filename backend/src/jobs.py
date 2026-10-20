@@ -142,14 +142,47 @@ def _event(job_id: str, level: str, message: str) -> None:
 
 # ------------------------------------------------------------- creación
 
-def _insert_job(job_id, user_id, filename, file_path, kind, engine, params, parent_id=None):
+def _insert_job(job_id, user_id, document_id, filename, file_path, kind, engine, params, parent_id=None):
     db.execute(
-        "INSERT INTO jobs(id, user_id, filename, file_path, kind, engine, params_json, "
-        "headers_json, status, created_at, parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, user_id, filename, file_path, kind, engine,
+        "INSERT INTO jobs(id, user_id, document_id, filename, file_path, kind, engine, params_json, "
+        "headers_json, status, created_at, parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, user_id, document_id, filename, file_path, kind, engine,
          json.dumps(params or {}, ensure_ascii=False), json.dumps(CEDULA_HEADERS),
          "queued", now(), parent_id),
     )
+
+
+def _insert_document(document_id: str, user_id: int, filename: str, file_path: Path,
+                     kind: str, size: int) -> None:
+    db.execute(
+        "INSERT INTO documents(id, user_id, filename, file_path, kind, size, created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (document_id, user_id, filename, str(file_path), kind, size, now()),
+    )
+
+
+def _create_jobs(document_id: str, user_id: int, filename: str, file_path: str,
+                 kind: str, engine: str, params: dict) -> str:
+    if engine not in ("local", "ai", "compare"):
+        raise HTTPException(400, "Motor no válido")
+    params = params or {}
+    if kind == "excel" and engine == "ai":
+        engine = "local"
+    job_id = str(uuid.uuid4())
+    if engine == "compare":
+        _insert_job(job_id, user_id, document_id, filename, file_path, kind, "compare", params)
+        for child_engine in ("local", "ai"):
+            child_id = str(uuid.uuid4())
+            child_params = dict(params, parent=job_id, hidden=True)
+            _insert_job(child_id, user_id, document_id, filename, file_path, kind, child_engine,
+                        child_params, parent_id=job_id)
+            enqueue(child_id)
+        _event(job_id, "info", "Job de comparación creado (local + IA)")
+        return job_id
+
+    _insert_job(job_id, user_id, document_id, filename, file_path, kind, engine, params)
+    enqueue(job_id)
+    return job_id
 
 
 def create_upload_job(user_id: int, filename: str, content: bytes, kind: str, engine: str, params: dict) -> str:
@@ -157,28 +190,22 @@ def create_upload_job(user_id: int, filename: str, content: bytes, kind: str, en
         raise HTTPException(400, "Tipo de archivo no soportado")
     if engine not in ("local", "ai", "compare"):
         raise HTTPException(400, "Motor no válido")
-    params = params or {}
-    if kind == "excel" and engine == "ai":
-        engine = "local"
     ext = ".pdf" if kind == "pdf" else Path(filename).suffix.lower()
-    job_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{job_id}{ext}"
+    document_id = str(uuid.uuid4())
+    file_path = UPLOAD_DIR / f"{document_id}{ext}"
     file_path.write_bytes(content)
+    _insert_document(document_id, user_id, filename, file_path, kind, len(content))
+    return _create_jobs(document_id, user_id, filename, str(file_path), kind, engine, params)
 
-    if engine == "compare":
-        _insert_job(job_id, user_id, filename, str(file_path), kind, "compare", params)
-        for child_engine in ("local", "ai"):
-            child_id = str(uuid.uuid4())
-            child_params = dict(params, parent=job_id, hidden=True)
-            _insert_job(child_id, user_id, filename, str(file_path), kind, child_engine,
-                        child_params, parent_id=job_id)
-            enqueue(child_id)
-        _event(job_id, "info", "Job de comparación creado (local + IA)")
-        return job_id
 
-    _insert_job(job_id, user_id, filename, str(file_path), kind, engine, params)
-    enqueue(job_id)
-    return job_id
+def create_job_from_document(document_id: str, user_id: int, engine: str,
+                             params: dict | None = None, user: dict | None = None) -> str:
+    document = _require_document(document_id, user)
+    path = Path(document["file_path"])
+    if not path.exists():
+        raise HTTPException(410, "El documento original ya no está disponible")
+    return _create_jobs(document["id"], user_id, document["filename"], str(path),
+                        document["kind"], engine, params or {})
 
 
 def retry_job(job_id: str, user_id: int, engine: str = None, user: dict | None = None) -> str:
@@ -188,6 +215,11 @@ def retry_job(job_id: str, user_id: int, engine: str = None, user: dict | None =
     engine = engine or job["engine"]
     if engine not in ("local", "ai", "compare"):
         raise HTTPException(400, "Motor no válido")
+    if job.get("document_id"):
+        params = json.loads(job["params_json"] or "{}")
+        params.pop("parent", None)
+        params.pop("hidden", None)
+        return create_job_from_document(job["document_id"], user_id, engine, params, user=user)
     path = Path(job["file_path"])
     if not path.exists():
         raise HTTPException(410, "El archivo original ya no está disponible")
@@ -387,9 +419,78 @@ def _children(job_id: str) -> list:
     )
 
 
+def can_access_document(document: dict, user: dict | None) -> bool:
+    if not user:
+        return False
+    if user.get("role") == "admin":
+        return True
+    return document.get("user_id") == user.get("id")
+
+
+def _require_document(document_id: str, user: dict | None = None) -> dict:
+    document = db.query_one("SELECT * FROM documents WHERE id=?", (document_id,))
+    if not document or not can_access_document(document, user):
+        raise HTTPException(404, "Documento no encontrado")
+    return document
+
+
+def public_document(document: dict) -> dict:
+    jobs = db.query(
+        "SELECT id, engine, status, created_at FROM jobs WHERE document_id=? AND parent_id IS NULL "
+        "ORDER BY created_at DESC", (document["id"],)
+    )
+    last = jobs[0] if jobs else None
+    return {
+        "id": document["id"],
+        "filename": document["filename"],
+        "kind": document["kind"],
+        "size": document["size"],
+        "created_at": document["created_at"],
+        "user": document.get("username"),
+        "job_count": len(jobs),
+        "last_job": {
+            "id": last["id"], "engine": last["engine"], "status": last["status"],
+            "created_at": last["created_at"],
+        } if last else None,
+    }
+
+
+def list_documents(user: dict | None = None, limit: int = 50) -> list:
+    limit = max(1, min(limit, 200))
+    base = (
+        "SELECT d.*, u.username FROM documents d LEFT JOIN users u ON u.id=d.user_id "
+    )
+    if user is not None and user.get("role") != "admin":
+        rows = db.query(
+            base + "WHERE d.user_id=? ORDER BY d.created_at DESC LIMIT ?",
+            (user["id"], limit),
+        )
+    else:
+        rows = db.query(base + "ORDER BY d.created_at DESC LIMIT ?", (limit,))
+    return [public_document(row) for row in rows]
+
+
+def delete_document(document_id: str, user: dict | None = None) -> None:
+    document = _require_document(document_id, user)
+    jobs = db.query("SELECT id, status FROM jobs WHERE document_id=?", (document_id,))
+    if any(job["status"] in ("queued", "processing") for job in jobs):
+        raise HTTPException(400, "Espera a que terminen o cancela los trabajos del documento")
+    for job in jobs:
+        _cancel.discard(job["id"])
+    db.execute("DELETE FROM jobs WHERE document_id=?", (document_id,))
+    db.execute("DELETE FROM documents WHERE id=?", (document_id,))
+    path = document.get("file_path")
+    if path and Path(path).exists() and UPLOAD_DIR in Path(path).parents:
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+
+
 def public_job(job: dict, with_children: bool = False) -> dict:
     result = {
         "id": job["id"],
+        "document_id": job.get("document_id"),
         "filename": job["filename"],
         "kind": job["kind"],
         "engine": job["engine"],
@@ -488,17 +589,12 @@ def job_events(job_id: str, limit: int = 50, user: dict | None = None) -> list:
 
 
 def delete_job(job_id: str, user: dict | None = None) -> None:
-    job = _require_job(job_id, user)
+    _require_job(job_id, user)
     for child in _children(job_id):
         _cancel.discard(child["id"])
     _cancel.discard(job_id)
-    for path_key in ("file_path",):
-        path = job.get(path_key)
-        if path and Path(path).exists() and UPLOAD_DIR in Path(path).parents:
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
+    # El documento y su archivo se conservan en Cargar OCR. Solo se elimina
+    # el trabajo y sus resultados; el PDF se borra desde "Documentos".
     db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
 

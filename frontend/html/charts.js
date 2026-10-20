@@ -18,7 +18,9 @@ export function donut(container, segments, options = {}) {
     const radius = (size - thickness) / 2;
     const circumference = 2 * Math.PI * radius;
     const center = size / 2;
-    const svg = svgEl('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img' });
+    const svg = svgEl('svg', {
+        viewBox: `0 0 ${size} ${size}`, width: size, height: size, role: 'img',
+    });
 
     const track = svgEl('circle', {
         cx: center, cy: center, r: radius, fill: 'none',
@@ -118,7 +120,8 @@ export function lineChart(container, points, options = {}) {
     const pad = { top: 18, right: 16, bottom: 34, left: 34 };
     const innerW = width - pad.left - pad.right;
     const innerH = height - pad.top - pad.bottom;
-    const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img' });
+    const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, width, height, role: 'img' });
+    svg.style.width = '100%';
 
     for (const level of [0, 25, 50, 75, 100]) {
         const y = pad.top + innerH - (level / 100) * innerH;

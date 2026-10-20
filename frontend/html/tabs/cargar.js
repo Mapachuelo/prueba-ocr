@@ -1,5 +1,7 @@
 import { api } from '../api.js';
-import { h, clear, toast, statusBadge, fmtDateTime } from '../ui.js';
+import {
+    h, clear, toast, statusBadge, fmtDateTime, confirmDialog, modal, actionMenu, emptyState,
+} from '../ui.js';
 import { icon } from '../icons.js';
 
 const ENGINES = [
@@ -51,11 +53,10 @@ export function render(container, { navigate }) {
         h('label', { class: 'field' }, 'DPI', dpi),
         h('label', { class: 'field' }, 'Páginas', pages),
     );
-    const submit = h('button', { class: 'btn primary', type: 'submit' }, icon('upload'), 'Procesar archivo');
-
-    const form = h('form', { class: 'stack', onsubmit: (event) => { event.preventDefault(); startJob(); } },
-        submit,
-    );
+    const submit = h('button', { class: 'btn primary', type: 'submit', disabled: true }, icon('upload'), 'Procesar archivo');
+    const actionSummary = h('div', { class: 'wizard-summary' });
+    const form = h('form', { onsubmit: (event) => { event.preventDefault(); startJob(); } }, submit);
+    const wizardActions = h('div', { class: 'wizard-actions' }, actionSummary, form);
 
     const stepFile = h('section', { class: 'step-card' },
         h('div', { class: 'step-head' }, h('span', { class: 'step-num' }, '1'), h('h2', {}, 'Archivo')),
@@ -67,7 +68,7 @@ export function render(container, { navigate }) {
     );
     const stepOptions = h('section', { class: 'step-card' },
         h('div', { class: 'step-head' }, h('span', { class: 'step-num' }, '3'), h('h2', {}, 'Opciones')),
-        pdfOptions, h('div', { style: 'margin-top:1rem' }, form),
+        pdfOptions,
     );
 
     const progressBar = h('div', { class: 'progress' }, h('div', { style: 'width:0%' }));
@@ -83,16 +84,31 @@ export function render(container, { navigate }) {
         logBox,
     );
     const recent = h('div', {});
+    const documentsBox = h('div', {});
 
     container.append(
         h('div', { class: 'steps' }, stepFile, stepEngine, stepOptions),
+        wizardActions,
         progressCard,
-        h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('div', {}, h('h2', {}, 'Últimos trabajos'))), recent),
+        h('div', { class: 'card' },
+            h('div', { class: 'card-head' },
+                h('div', {},
+                    h('h2', {}, 'Documentos cargados'),
+                    h('p', { class: 'muted' }, 'Los archivos originales se conservan aunque borres un trabajo OCR.')),
+            ),
+            documentsBox,
+        ),
+        h('div', { class: 'card' },
+            h('div', { class: 'card-head' }, h('div', {}, h('h2', {}, 'Últimos trabajos'))),
+            recent,
+        ),
     );
 
     renderEngineChoices();
     loadProviders();
     loadRecent();
+    loadDocuments();
+    updateSummary();
 
     function renderEngineChoices() {
         clear(engineBox);
@@ -100,7 +116,7 @@ export function render(container, { navigate }) {
             const choice = h('label', { class: `choice ${engine === option.id ? 'selected' : ''}` },
                 h('input', {
                     type: 'radio', name: 'engine', value: option.id, checked: engine === option.id,
-                    onchange: () => { engine = option.id; renderEngineChoices(); updateModelVisibility(); },
+                    onchange: () => { engine = option.id; renderEngineChoices(); updateModelVisibility(); updateSummary(); },
                 }),
                 h('span', { class: 'choice-icon' }, icon(option.icon, 18)),
                 h('span', {}, h('strong', {}, option.title), h('small', {}, option.detail)),
@@ -115,11 +131,30 @@ export function render(container, { navigate }) {
         if (ai) renderModels();
     }
 
+    function updateSummary() {
+        const option = ENGINES.find((item) => item.id === engine) || ENGINES[0];
+        clear(actionSummary);
+        actionSummary.append(
+            h('strong', {}, file ? file.name : 'Ningún archivo seleccionado'),
+            h('span', { class: 'muted' }, file
+                ? `${formatSize(file.size)} · ${option.title}`
+                : 'Elige un PDF o Excel y el motor de OCR'),
+        );
+        submit.disabled = !file;
+    }
+
+    function formatSize(bytes) {
+        if (!bytes) return '0 KB';
+        if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    }
+
     function setFile(selected) {
         file = selected;
-        fileName.textContent = `${selected.name} · ${(selected.size / 1024).toFixed(0)} KB`;
+        fileName.textContent = `${selected.name} · ${formatSize(selected.size)}`;
         pdfOptions.hidden = !selected.name.toLowerCase().endsWith('.pdf');
         if (pdfOptions.hidden) { engine = 'local'; renderEngineChoices(); updateModelVisibility(); }
+        updateSummary();
     }
 
     let providers = null;
@@ -182,6 +217,19 @@ export function render(container, { navigate }) {
         ));
     }
 
+    function beginJob(id) {
+        jobId = id;
+        progressCard.hidden = false;
+        resultsBtn.hidden = true;
+        compareBtn.hidden = true;
+        cancelBtn.hidden = false;
+        progressBar.classList.remove('success', 'error');
+        progressBar.firstChild.style.width = '0%';
+        clear(logBox);
+        progressCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        poll();
+    }
+
     async function startJob() {
         if (!file) { toast('Selecciona un archivo primero', 'warning'); return; }
         if (engine !== 'local' && !selectedModel) {
@@ -200,19 +248,11 @@ export function render(container, { navigate }) {
             }
             if (engine !== 'local' && selectedModel) formData.append('model', selectedModel);
             const data = await api('/api/jobs', { method: 'POST', form: formData });
-            jobId = data.id;
-            progressCard.hidden = false;
-            resultsBtn.hidden = true;
-            compareBtn.hidden = true;
-            cancelBtn.hidden = false;
-            progressBar.classList.remove('success', 'error');
-            progressBar.firstChild.style.width = '0%';
-            clear(logBox);
-            poll();
+            beginJob(data.id);
         } catch (error) {
             toast(error.message, 'error');
         } finally {
-            submit.disabled = false;
+            submit.disabled = !file;
         }
     }
 
@@ -289,6 +329,120 @@ export function render(container, { navigate }) {
                 ));
             }
             recent.append(cards);
+        } catch (error) { toast(error.message, 'error'); }
+    }
+
+    async function loadDocuments() {
+        try {
+            const data = await api('/api/documents?limit=30');
+            clear(documentsBox);
+            if (!data.items.length) {
+                documentsBox.append(emptyState(
+                    'Sin documentos',
+                    'Sube un PDF o Excel para conservarlo aquí y reprocesarlo cuando quieras.',
+                ));
+                return;
+            }
+            const tbody = h('tbody', {});
+            for (const document of data.items) {
+                const last = document.last_job;
+                tbody.append(h('tr', {},
+                    h('td', {}, fmtDateTime(document.created_at)),
+                    h('td', {}, h('strong', {}, document.filename),
+                        h('div', { class: 'muted' }, document.kind === 'pdf' ? 'PDF' : 'Excel')),
+                    h('td', { class: 'num' }, formatSize(document.size)),
+                    h('td', { class: 'num' }, document.job_count),
+                    h('td', {}, last ? statusBadge(last.status) : h('em', {}, 'Sin trabajos')),
+                    h('td', {}, h('div', { class: 'table-actions' },
+                        h('button', { class: 'btn outline sm', onclick: () => reprocessDocument(document) }, 'Procesar'),
+                        actionMenu([{
+                            label: 'Borrar documento',
+                            danger: true,
+                            onClick: () => deleteDocument(document),
+                        }]),
+                    )),
+                ));
+            }
+            documentsBox.append(h('div', { class: 'table-wrap desktop-table' },
+                h('table', {},
+                    h('thead', {}, h('tr', {},
+                        h('th', {}, 'Fecha'), h('th', {}, 'Documento'), h('th', { class: 'num' }, 'Tamaño'),
+                        h('th', { class: 'num' }, 'Trabajos'), h('th', {}, 'Último estado'), h('th', {}, 'Acciones'),
+                    )),
+                    tbody,
+                ),
+            ));
+            const cards = h('div', { class: 'mobile-cards' });
+            for (const document of data.items) {
+                const last = document.last_job;
+                cards.append(h('div', { class: 'mobile-card' },
+                    h('div', { class: 'mc-head' },
+                        h('strong', {}, document.filename),
+                        last ? statusBadge(last.status) : h('em', {}, 'Sin trabajos'),
+                    ),
+                    h('div', { class: 'mc-row' }, h('span', {}, 'Fecha'), h('span', {}, fmtDateTime(document.created_at))),
+                    h('div', { class: 'mc-row' }, h('span', {}, 'Tamaño'), h('span', {}, formatSize(document.size))),
+                    h('div', { class: 'mc-row' }, h('span', {}, 'Trabajos'), h('span', {}, document.job_count)),
+                    h('div', { class: 'btn-row', style: 'margin-top:0.7rem' },
+                        h('button', { class: 'btn outline sm', onclick: () => reprocessDocument(document) }, 'Procesar'),
+                        actionMenu([{
+                            label: 'Borrar documento',
+                            danger: true,
+                            onClick: () => deleteDocument(document),
+                        }]),
+                    ),
+                ));
+            }
+            documentsBox.append(cards);
+        } catch (error) {
+            clear(documentsBox);
+            documentsBox.append(h('div', { class: 'alert error' }, error.message));
+        }
+    }
+
+    function reprocessDocument(document) {
+        const engineSelect = h('select', {},
+            h('option', { value: 'local' }, 'Local · Tesseract + OpenCV'),
+            h('option', { value: 'ai' }, 'IA local · modelo de visión'),
+            h('option', { value: 'compare' }, 'Comparar local e IA'),
+        );
+        const message = h('div', {});
+        modal(`Procesar de nuevo · ${document.filename}`, h('div', { class: 'stack' },
+            h('p', { class: 'muted' }, 'Se reutiliza el archivo original; no hace falta volver a subirlo.'),
+            h('label', { class: 'field' }, 'Motor OCR', engineSelect),
+            message,
+        ), [{
+            label: 'Procesar', class: 'primary',
+            onClick: async (close) => {
+                try {
+                    const data = await api(`/api/documents/${document.id}/jobs`, {
+                        method: 'POST',
+                        body: {
+                            engine: engineSelect.value,
+                            model: engineSelect.value === 'local' ? '' : selectedModel,
+                        },
+                    });
+                    close();
+                    beginJob(data.id);
+                    toast('Trabajo creado desde el documento', 'success');
+                    loadRecent();
+                    loadDocuments();
+                } catch (error) {
+                    clear(message);
+                    message.append(h('div', { class: 'alert error' }, error.message));
+                }
+            },
+        }]);
+    }
+
+    async function deleteDocument(document) {
+        if (!(await confirmDialog(
+            `¿Eliminar el documento “${document.filename}” y todos sus trabajos? Esta acción borra el archivo original.`,
+        ))) return;
+        try {
+            await api(`/api/documents/${document.id}`, { method: 'DELETE' });
+            toast('Documento y trabajos eliminados', 'success');
+            await Promise.all([loadDocuments(), loadRecent()]);
         } catch (error) { toast(error.message, 'error'); }
     }
 

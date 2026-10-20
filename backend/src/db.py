@@ -1,6 +1,9 @@
 import os
 import sqlite3
 import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .settings_store import DATA_DIR
@@ -32,9 +35,20 @@ CREATE TABLE IF NOT EXISTS sessions(
     user_agent TEXT
 );
 
+CREATE TABLE IF NOT EXISTS documents(
+    id TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs(
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
     filename TEXT,
     file_path TEXT,
     kind TEXT,
@@ -89,6 +103,7 @@ CREATE TABLE IF NOT EXISTS app_settings(
 
 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_results_job_field ON results(job_id, field);
 """
 
@@ -105,6 +120,19 @@ def get_conn() -> sqlite3.Connection:
         return _conn
 
 
+@contextmanager
+def transaction():
+    """Agrupa varias operaciones en una sola transacción SQLite."""
+    with _lock:
+        conn = get_conn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def init_db() -> None:
     with _lock:
         conn = get_conn()
@@ -117,7 +145,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if "parent_id" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN parent_id TEXT")
+    if "document_id" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN document_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_document ON jobs(document_id)")
+
+    # Migración: cada archivo fuente existente se convierte en un documento
+    # independiente del trabajo OCR. Así borrar un trabajo no borra el PDF.
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE engine<>'gt' AND file_path IS NOT NULL "
+        "AND file_path<>'' AND document_id IS NULL ORDER BY created_at"
+    ).fetchall()
+    by_path = {}
+    for row in rows:
+        path = row["file_path"]
+        doc_id = by_path.get(path)
+        if not doc_id:
+            found = conn.execute(
+                "SELECT id FROM documents WHERE file_path=? LIMIT 1", (path,)
+            ).fetchone()
+            if found:
+                doc_id = found["id"]
+            else:
+                doc_id = str(uuid.uuid4())
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                conn.execute(
+                    "INSERT INTO documents(id, user_id, filename, file_path, kind, size, created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (doc_id, row["user_id"], row["filename"], path, row["kind"] or "pdf",
+                     size, row["created_at"] or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                )
+            by_path[path] = doc_id
+        conn.execute("UPDATE jobs SET document_id=? WHERE id=?", (doc_id, row["id"]))
 
 
 def query(sql: str, params=()) -> list:

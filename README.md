@@ -22,14 +22,15 @@ Si no existe ningún usuario, la pantalla muestra **“Crear administrador”**:
 
 No hay usuario/contraseña por defecto; no se puede entrar sin crear esta cuenta.
 
-### Instalación local actual (migrada desde data/auth.json)
-| Campo | Valor |
-|---|---|
-| Usuario | `admin` |
-| Contraseña | `ClaveSegura123` |
-| Rol | `admin` |
+### Instalación local actual
+| Usuario | Contraseña | Rol |
+|---|---|---|
+| `admin` | `admin123` | `admin` |
+| `usuario` | `usuario123` | `usuario` |
 
-> Credenciales solo para el entorno local. En producción cámbialas antes de exponer la web.
+> Credenciales solo para el entorno local. La instalación nueva sigue usando la
+> pantalla “Crear administrador”; estas cuentas existen en esta instancia local.
+> En producción cámbialas antes de exponer la web.
 
 ### Roles
 - **`admin`**: acceso total (Inicio, Cargar OCR, Datos, Comparar, Historial,
@@ -38,6 +39,7 @@ No hay usuario/contraseña por defecto; no se puede entrar sin crear esta cuenta
   Comparar e Historial **de sus propios trabajos**). No ve Configuración ni los
   trabajos de otros usuarios.
 
+El sistema impide degradar, desactivar o eliminar al último administrador activo.
 La longitud mínima se puede ajustar con `PASSWORD_MIN_LENGTH` (por defecto 4).
 
 ### Iniciar sesión
@@ -64,7 +66,7 @@ podman exec -it ocr-app-backend python3 -c "
 from src import auth, db
 auth.db.init_db()
 u = db.query_one('SELECT id FROM users WHERE username=?', ('admin',))
-auth.update_user(u['id'], password='NuevaClave123')
+auth.update_user(u['id'], role='admin', active=True, password='NuevaClave123')
 "
 ```
 
@@ -79,16 +81,21 @@ Se pierde el historial de trabajos y usuarios; la configuración IA cifrada
   evolución). El usuario ve solo sus trabajos; el admin, la vista global.
 - **Cargar OCR:** asistente en 3 pasos (archivo → motor → opciones) con progreso
   en vivo. El modelo de IA se **detecta automáticamente**; no se escribe a mano.
+  Incluye una lista de **documentos cargados** que conserva el PDF/Excel original
+  para reprocesarlo sin volver a subirlo.
 - **Datos:** tabla espaciosa, filtros por campo/origen/estado, chips de filtros,
   selector de columnas, edición en panel lateral (drawer), selección y exportación.
   En móvil la tabla se convierte en tarjetas.
 - **Comparar:** A vs B (otro motor o el ground truth), coincidencia por campo y
-  acción “Usar B”.
+  acción “Usar B”. Las diferencias se muestran como tabla en escritorio y tarjetas
+  en móvil.
 - **Historial:** filtros por fecha, archivo, motor, estado y usuario (admin);
-  abrir, cancelar, reintentar, descargar y borrar.
+  abrir, cancelar, reintentar, descargar y borrar. Borrar un trabajo elimina solo
+  sus resultados: el documento original permanece en **Cargar OCR**. Para borrar
+  también el archivo hay que usar **Documentos → Borrar documento**.
 - **Configuración (admin):** proveedor de IA, OCR por defecto y usuarios.
 
-Diseño responsive (1440/1024/768/390), sin emojis ni ilustraciones tipo sticker;
+Diseño responsive verificado en 1920/1440/1024/768/390, sin emojis ni ilustraciones tipo sticker;
 solo iconos lineales. Los gráficos son SVG propios, sin dependencias ni CDN.
 
 ## Motores de OCR
@@ -163,6 +170,9 @@ podman pod rm ocr-app
 | `GET /api/auth/me`, `POST /api/auth/change-password` | autenticado | Cuenta propia |
 | `GET/POST/PATCH/DELETE /api/users` | admin | Usuarios y roles |
 | `POST /api/jobs` | admin/usuario | Sube archivo y crea job asíncrono (incluye `model`) |
+| `GET /api/documents` | admin/usuario | Documentos originales conservados (filtrado por dueño) |
+| `POST /api/documents/{id}/jobs` | admin/usuario | Reprocesa un documento sin volver a subirlo |
+| `DELETE /api/documents/{id}` | dueño/admin | Borra el documento, su archivo y sus trabajos |
 | `GET /api/jobs`, `GET /api/jobs/{id}`, `/events` | autenticado | Historial y progreso (filtrado por dueño) |
 | `POST /api/jobs/{id}/cancel`, `/retry`, `DELETE` | dueño/admin | Control |
 | `GET/PATCH /api/jobs/{id}/results` | dueño/admin | Resultados con filtros y edición |
@@ -176,8 +186,8 @@ podman pod rm ocr-app
 
 ## Base de datos y archivos
 
-- `data/ocr.db` (SQLite): usuarios, sesiones, jobs, resultados, eventos y auditoría.
-- `data/uploads/`, `data/downloads/`: archivos subidos y exportados.
+- `data/ocr.db` (SQLite): usuarios, sesiones, documentos, jobs, resultados, eventos y auditoría.
+- `data/uploads/`, `data/downloads/`: documentos originales y archivos exportados.
 - `data/.secret_key`, `data/auth.json`, `data/ai_settings.enc`: sensibles.
   Si borras `.secret_key`, la configuración IA queda ilegible (vuelve a guardarla).
 - `data/ground_truth.*`: referencia del agente (42 páginas de `data/documento.pdf`).

@@ -1,5 +1,5 @@
 import { api, downloadFrom } from '../api.js';
-import { h, clear, toast, statusBadge, confirmDialog, fmtDateTime, emptyState } from '../ui.js';
+import { h, clear, toast, statusBadge, confirmDialog, fmtDateTime, emptyState, actionMenu } from '../ui.js';
 import { icon } from '../icons.js';
 
 const STATUS_OPTIONS = [
@@ -107,45 +107,47 @@ export function render(container, { user, navigate }) {
     }
 
     function actionButtons(job) {
-        const buttons = [
-            h('button', {
-                class: 'btn outline sm',
-                onclick: () => navigate(job.engine === 'compare' ? `comparar?job=${job.id}` : `datos?job=${job.id}`),
-            }, 'Abrir'),
-        ];
+        const primary = h('button', {
+            class: 'btn outline sm',
+            onclick: () => navigate(job.engine === 'compare' ? `comparar?job=${job.id}` : `datos?job=${job.id}`),
+        }, 'Abrir');
+        const secondary = [];
         if (job.status === 'done' && job.engine !== 'compare') {
-            buttons.push(h('button', {
-                class: 'btn outline sm',
-                onclick: () => downloadFrom(`/api/jobs/${job.id}/export/xlsx`, { filters: {} }, `${job.filename}.xlsx`)
+            secondary.push({
+                label: 'Descargar XLSX',
+                onClick: () => downloadFrom(`/api/jobs/${job.id}/export/xlsx`, { filters: {} }, `${job.filename}.xlsx`)
                     .catch((error) => toast(error.message, 'error')),
-            }, 'XLSX'));
+            });
         }
         if (['queued', 'processing'].includes(job.status)) {
-            buttons.push(h('button', {
-                class: 'btn warning sm',
-                onclick: () => api(`/api/jobs/${job.id}/cancel`, { method: 'POST' })
+            secondary.push({
+                label: 'Cancelar trabajo',
+                onClick: () => api(`/api/jobs/${job.id}/cancel`, { method: 'POST' })
                     .then(() => load()).catch((error) => toast(error.message, 'error')),
-            }, 'Cancelar'));
+            });
         } else {
-            buttons.push(h('button', {
-                class: 'btn outline sm',
-                onclick: () => api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: {} })
+            secondary.push({
+                label: 'Reintentar OCR',
+                onClick: () => api(`/api/jobs/${job.id}/retry`, { method: 'POST', body: {} })
                     .then(() => { toast('Reprocesando', 'success'); load(); })
                     .catch((error) => toast(error.message, 'error')),
-            }, 'Reintentar'));
+            });
         }
-        buttons.push(h('button', {
-            class: 'btn danger sm',
-            onclick: async () => {
-                if (!(await confirmDialog(`¿Eliminar el trabajo “${job.filename}”?`))) return;
+        secondary.push({
+            label: 'Borrar trabajo',
+            danger: true,
+            onClick: async () => {
+                if (!(await confirmDialog(
+                    `¿Eliminar el trabajo “${job.filename}”? El documento original se conservará en Cargar OCR.`,
+                ))) return;
                 try {
                     await api(`/api/jobs/${job.id}`, { method: 'DELETE' });
-                    toast('Trabajo eliminado', 'success');
+                    toast('Trabajo eliminado; el documento se conservó', 'success');
                     load();
                 } catch (error) { toast(error.message, 'error'); }
             },
-        }, 'Borrar'));
-        return h('div', { class: 'table-actions' }, ...buttons);
+        });
+        return h('div', { class: 'table-actions' }, primary, actionMenu(secondary));
     }
 
     function renderTable(items) {

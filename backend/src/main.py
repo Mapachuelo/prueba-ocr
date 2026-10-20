@@ -91,6 +91,14 @@ class UserPatch(BaseModel):
     password: Optional[str] = None
 
 
+class DocumentJobIn(BaseModel):
+    engine: str = "local"
+    profile: str = ""
+    dpi: str = ""
+    pages: str = ""
+    model: str = ""
+
+
 class AISettingsIn(BaseModel):
     provider: str = "local"
     api_key: str = ""
@@ -260,6 +268,41 @@ async def create_job(
     job_id = jobs.create_upload_job(user["id"], file.filename, content, kind, engine, params)
     db.audit(user["id"], "job_create", job_id, f"{file.filename} engine={engine}")
     return {"id": job_id}
+
+
+@app.get("/api/documents", dependencies=[Depends(auth.require_role("admin", "usuario"))])
+async def get_documents(user: dict = Depends(auth.require_role("admin", "usuario"))):
+    return {"items": jobs.list_documents(user=user)}
+
+
+@app.post("/api/documents/{document_id}/jobs", dependencies=[Depends(auth.require_role("admin", "usuario"))])
+async def create_document_job(document_id: str, data: DocumentJobIn,
+                               user: dict = Depends(auth.require_role("admin", "usuario"))):
+    params = {}
+    if data.profile:
+        params["profile"] = data.profile
+    if data.dpi:
+        try:
+            params["dpi"] = int(data.dpi)
+        except ValueError:
+            raise HTTPException(400, "DPI no válido")
+    if data.pages:
+        params["pages"] = data.pages
+    if data.model:
+        params["model"] = data.model
+    job_id = jobs.create_job_from_document(
+        document_id, user["id"], data.engine, params, user=user
+    )
+    db.audit(user["id"], "job_create", job_id, f"document={document_id} engine={data.engine}")
+    return {"id": job_id}
+
+
+@app.delete("/api/documents/{document_id}", dependencies=[Depends(auth.require_role("admin", "usuario"))])
+async def remove_document(document_id: str, user: dict = Depends(auth.require_role("admin", "usuario"))):
+    document = jobs._require_document(document_id, user)
+    jobs.delete_document(document_id, user=user)
+    db.audit(user["id"], "document_delete", document_id, document["filename"])
+    return {"ok": True}
 
 
 @app.get("/api/jobs", dependencies=[Depends(auth.require_auth)])
