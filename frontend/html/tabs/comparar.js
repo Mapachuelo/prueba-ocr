@@ -5,8 +5,8 @@ import { hbars } from '../charts.js';
 export function render(container, { params, navigate }) {
     const state = { baseId: null, otherId: null, data: null };
 
-    const baseSelect = h('select', { onchange: () => load() });
-    const otherSelect = h('select', { onchange: () => load() });
+    const baseSelect = h('select', { onchange: () => { syncUrl(); load(); } });
+    const otherSelect = h('select', { onchange: () => { syncUrl(); load(); } });
     const fieldSelect = h('select', {});
     fieldSelect.append(h('option', { value: '' }, 'Todos los campos'));
     for (const [key, label] of Object.entries(FIELD_LABELS)) {
@@ -44,6 +44,42 @@ export function render(container, { params, navigate }) {
         return value;
     }
 
+    function addOption(select, id, label) {
+        if (!id || [...select.options].some((option) => option.value === id)) return;
+        select.append(h('option', { value: id }, label));
+    }
+
+    function jobLabel(job) {
+        const when = new Date(job.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' });
+        return `${when} · ${job.filename} · ${job.engine}`;
+    }
+
+    function addChildOptions(parent) {
+        for (const child of parent.children || []) {
+            const label = `${parent.filename} · ${child.engine === 'ai' ? 'IA' : child.engine} (hijo)`;
+            addOption(baseSelect, child.id, label);
+            addOption(otherSelect, child.id, label);
+        }
+    }
+
+    function syncUrl() {
+        const query = new URLSearchParams();
+        if (baseSelect.value) query.set('base', baseSelect.value);
+        if (otherSelect.value) query.set('other', otherSelect.value);
+        if (fieldSelect.value) query.set('field', fieldSelect.value);
+        if (pageFrom.value) query.set('page_from', pageFrom.value);
+        if (pageTo.value) query.set('page_to', pageTo.value);
+        const saved = {
+            base: baseSelect.value,
+            other: otherSelect.value,
+            field: fieldSelect.value,
+            page_from: pageFrom.value,
+            page_to: pageTo.value,
+        };
+        try { localStorage.setItem('ocr.compareSelection.v1', JSON.stringify(saved)); } catch (error) { /* ignora */ }
+        history.replaceState(null, '', `#/comparar?${query}`);
+    }
+
     async function loadOptions() {
         const [jobsData, gt] = await Promise.all([
             api('/api/jobs?filters=' + encodeURIComponent(JSON.stringify({ status: 'done' })) + '&size=200'),
@@ -53,30 +89,55 @@ export function render(container, { params, navigate }) {
         clear(baseSelect);
         clear(otherSelect);
         for (const job of jobs) {
-            const when = new Date(job.created_at).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' });
-            const label = `${when} · ${job.filename} · ${job.engine}`;
-            baseSelect.append(h('option', { value: job.id }, label));
-            otherSelect.append(h('option', { value: job.id }, label));
+            const label = jobLabel(job);
+            addOption(baseSelect, job.id, label);
+            addOption(otherSelect, job.id, label);
         }
         if (gt) {
             otherSelect.prepend(h('option', { value: gt.id }, 'Referencia · Agente (ground truth)'));
         }
 
-        let baseId = params.job || null;
-        let otherId = gt ? gt.id : null;
+        let remembered = {};
+        try { remembered = JSON.parse(localStorage.getItem('ocr.compareSelection.v1') || '{}'); } catch (error) { remembered = {}; }
+        let baseId = params.base || params.job || remembered.base || null;
+        let otherId = params.other || remembered.other || (gt ? gt.id : null);
         if (baseId) {
-            const job = await api(`/api/jobs/${baseId}`);
-            if (job.engine === 'compare' && job.children?.length) {
+            let job;
+            try {
+                job = await api(`/api/jobs/${baseId}`);
+            } catch (error) {
+                baseId = null;
+            }
+            if (job && job.engine === 'compare' && job.children?.length) {
+                addChildOptions(job);
                 const localChild = job.children.find((child) => child.engine === 'local') || job.children[0];
                 const otherChild = job.children.find((child) => child.engine !== localChild.engine);
                 baseId = localChild.id;
                 if (otherChild) otherId = otherChild.id;
+            } else if (job && ![...baseSelect.options].some((option) => option.value === baseId)) {
+                const label = jobLabel(job);
+                addOption(baseSelect, baseId, label);
+                addOption(otherSelect, baseId, label);
+            }
+        }
+        if (otherId && ![...otherSelect.options].some((option) => option.value === otherId)) {
+            try {
+                const other = await api(`/api/jobs/${otherId}`);
+                const label = jobLabel(other);
+                addOption(baseSelect, otherId, label);
+                addOption(otherSelect, otherId, label);
+            } catch (error) {
+                otherId = null;
             }
         }
         if (!baseId && jobs.length) baseId = jobs[0].id;
         if (!otherId) otherId = jobs.find((job) => job.id !== baseId)?.id || null;
         baseSelect.value = baseId || '';
         otherSelect.value = otherId || '';
+        fieldSelect.value = params.field || remembered.field || '';
+        pageFrom.value = params.page_from || remembered.page_from || '';
+        pageTo.value = params.page_to || remembered.page_to || '';
+        syncUrl();
     }
 
     async function load() {
@@ -115,6 +176,11 @@ export function render(container, { params, navigate }) {
         summaryBox.append(cards);
         summaryBox.append(h('p', { class: 'muted' },
             `A: ${data.base.filename} (${data.base.engine}) · B: ${data.other.filename} (${data.other.engine})`));
+        if ((data.base.engine === 'ai' && !data.base.ai_used)
+            || (data.other.engine === 'ai' && !data.other.ai_used)) {
+            summaryBox.append(h('div', { class: 'alert warning', style: 'margin-top:0.7rem' },
+                'La IA no se ejecutó en uno de los trabajos; se está comparando el resultado de respaldo local.'));
+        }
 
         const fieldItems = Object.entries(data.summary).map(([field, stats]) => {
             const total = stats.same + stats.diff;

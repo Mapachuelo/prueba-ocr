@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { h, clear, emptyState, statusBadge, fmtDateTime, FIELD_LABELS } from '../ui.js';
+import { h, clear, emptyState, statusBadge, fmtDateTime, FIELD_LABELS, watchDataChanges } from '../ui.js';
 import { icon } from '../icons.js';
 import { donut, hbars, lineChart } from '../charts.js';
 
@@ -119,6 +119,15 @@ export function render(container, { navigate }) {
         );
     }
 
+    function recentEngine(job) {
+        return h('span', {},
+            job.engine,
+            job.engine === 'ai' && !job.ai_used
+                ? h('span', { class: 'badge-status warning', style: 'margin-left:0.35rem' }, 'Fallback local')
+                : null,
+        );
+    }
+
     function renderRecent(data) {
         if (!data.items.length) return;
         const tbody = h('tbody', {});
@@ -126,7 +135,7 @@ export function render(container, { navigate }) {
             tbody.append(h('tr', { class: 'row-click', onclick: () => navigate(job.engine === 'compare' ? `comparar?job=${job.id}` : `datos?job=${job.id}`) },
                 h('td', {}, fmtDateTime(job.created_at)),
                 h('td', {}, job.filename),
-                h('td', {}, job.engine),
+                h('td', {}, recentEngine(job)),
                 h('td', {}, statusBadge(job.status)),
                 h('td', { class: 'num' }, job.row_count),
             ));
@@ -155,12 +164,13 @@ export function render(container, { navigate }) {
             wrap.append(h('div', { class: 'mobile-card', onclick: () => navigate(job.engine === 'compare' ? `comparar?job=${job.id}` : `datos?job=${job.id}`) },
                 h('div', { class: 'mc-head' }, h('strong', {}, job.filename), statusBadge(job.status)),
                 h('div', { class: 'mc-row' }, h('span', {}, 'Fecha'), h('span', {}, fmtDateTime(job.created_at))),
-                h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, job.engine)),
+                h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, recentEngine(job))),
                 h('div', { class: 'mc-row' }, h('span', {}, 'Filas'), h('span', {}, job.row_count)),
             ));
         }
         return wrap;
     }
 
-    return {};
+    const stopWatch = watchDataChanges(load);
+    return { destroy() { stopWatch(); } };
 }

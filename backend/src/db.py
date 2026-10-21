@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS users(
     salt TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'usuario',
     active INTEGER NOT NULL DEFAULT 1,
+    paid_ai INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_login TEXT
 );
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS documents(
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     filename TEXT NOT NULL,
+    original_filename TEXT,
     file_path TEXT NOT NULL,
     kind TEXT NOT NULL,
     size INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS jobs(
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
     filename TEXT,
+    original_filename TEXT,
     file_path TEXT,
     kind TEXT,
     engine TEXT,
@@ -142,13 +145,32 @@ def init_db() -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "paid_ai" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN paid_ai INTEGER NOT NULL DEFAULT 0")
+
     columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     if "parent_id" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN parent_id TEXT")
     if "document_id" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN document_id TEXT")
+    if "original_filename" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN original_filename TEXT")
+        conn.execute("UPDATE jobs SET original_filename=filename WHERE original_filename IS NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_document ON jobs(document_id)")
+
+    doc_columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    if "original_filename" not in doc_columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN original_filename TEXT")
+    conn.execute("UPDATE documents SET original_filename=filename WHERE original_filename IS NULL")
+    # El documento es la fuente canónica del nombre visible. Sincroniza
+    # trabajos antiguos que se crearon antes de este cambio.
+    conn.execute(
+        "UPDATE jobs SET filename=(SELECT d.filename FROM documents d WHERE d.id=jobs.document_id) "
+        "WHERE document_id IS NOT NULL AND EXISTS("
+        "SELECT 1 FROM documents d WHERE d.id=jobs.document_id)"
+    )
 
     # Migración: cada archivo fuente existente se convierte en un documento
     # independiente del trabajo OCR. Así borrar un trabajo no borra el PDF.
@@ -173,10 +195,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 except OSError:
                     size = 0
                 conn.execute(
-                    "INSERT INTO documents(id, user_id, filename, file_path, kind, size, created_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (doc_id, row["user_id"], row["filename"], path, row["kind"] or "pdf",
-                     size, row["created_at"] or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                    "INSERT INTO documents(id, user_id, filename, original_filename, file_path, kind, size, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (doc_id, row["user_id"], row["filename"], row["original_filename"] or row["filename"],
+                     path, row["kind"] or "pdf", size,
+                     row["created_at"] or datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
             by_path[path] = doc_id
         conn.execute("UPDATE jobs SET document_id=? WHERE id=?", (doc_id, row["id"]))

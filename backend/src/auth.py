@@ -143,14 +143,14 @@ def create_first_admin(username: str, password: str) -> int:
 
 def list_users() -> list:
     return db.query(
-        "SELECT id, username, role, active, created_at, last_login FROM users ORDER BY username"
+        "SELECT id, username, role, active, paid_ai, created_at, last_login FROM users ORDER BY username"
     )
 
 
 LAST_ADMIN_MESSAGE = "Debe existir al menos un administrador activo"
 
 
-def update_user(user_id: int, role=None, active=None, password=None) -> None:
+def update_user(user_id: int, role=None, active=None, password=None, paid_ai=None) -> None:
     if role is not None and role not in ROLES:
         raise HTTPException(400, "Rol no válido")
     if password and len(password) < PASSWORD_MIN_LENGTH:
@@ -181,6 +181,8 @@ def update_user(user_id: int, role=None, active=None, password=None) -> None:
             conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, user_id))
             if not active:
                 conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        if paid_ai is not None:
+            conn.execute("UPDATE users SET paid_ai=? WHERE id=?", (1 if paid_ai else 0, user_id))
         if password:
             salt = secrets.token_bytes(16)
             conn.execute(
@@ -220,6 +222,18 @@ def verify_credentials(username: str, password: str):
         return None
     db.execute("UPDATE users SET last_login=? WHERE id=?", (now(), user["id"]))
     return user
+
+
+def verify_user_password(user_id: int, password: str) -> bool:
+    user = db.query_one("SELECT * FROM users WHERE id=?", (user_id,))
+    if not user:
+        return False
+    try:
+        salt = bytes.fromhex(user["salt"])
+        expected = bytes.fromhex(user["password_hash"])
+    except ValueError:
+        return False
+    return hmac.compare_digest(_hash(password or "", salt), expected)
 
 
 def change_password(user_id: int, current: str, new: str) -> None:
@@ -262,7 +276,7 @@ def session_user(request: Request):
     if not token:
         return None
     row = db.query_one(
-        "SELECT s.*, u.username, u.role, u.active FROM sessions s "
+        "SELECT s.*, u.username, u.role, u.active, u.paid_ai FROM sessions s "
         "JOIN users u ON u.id = s.user_id WHERE s.token_hash=?",
         (_token_hash(token),),
     )
@@ -275,6 +289,7 @@ def session_user(request: Request):
         "id": row["user_id"],
         "username": row["username"],
         "role": row["role"],
+        "paid_ai": bool(row["paid_ai"]),
         "token_hash": row["token_hash"],
     }
 

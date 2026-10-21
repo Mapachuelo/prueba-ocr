@@ -1,19 +1,23 @@
 import { api } from '../api.js';
 import {
     h, clear, toast, statusBadge, fmtDateTime, confirmDialog, modal, actionMenu, emptyState,
+    notifyDataChanged, watchDataChanges,
 } from '../ui.js';
 import { icon } from '../icons.js';
+import { createModelPicker } from '../model_picker.js';
 
-const ENGINES = [
+const BASE_ENGINES = [
     { id: 'local', title: 'Local', detail: 'Tesseract + OpenCV, sin IA', icon: 'cpu' },
     { id: 'ai', title: 'IA local', detail: 'Modelo de visión en llama.cpp', icon: 'scan' },
     { id: 'compare', title: 'Comparar', detail: 'Ejecuta local e IA y contrasta', icon: 'compare' },
 ];
 
-export function render(container, { navigate }) {
+export function render(container, { user, navigate }) {
     let file = null;
     let engine = 'local';
     let selectedModel = '';
+    let providers = null;
+    let displayFormat = 'pdf';
     let jobId = null;
     let timer = null;
 
@@ -22,6 +26,21 @@ export function render(container, { navigate }) {
         onchange: () => { if (fileInput.files.length) setFile(fileInput.files[0]); },
     });
     const fileName = h('div', { class: 'file-name' }, 'Ningún archivo seleccionado');
+    const displayName = h('input', { type: 'text', placeholder: 'Nombre sin extensión', maxlength: '115' });
+    const formatBox = h('div', { class: 'format-choice' });
+    const displayNameWrap = h('div', { class: 'field', hidden: true },
+        h('span', { class: 'field-label-row' },
+            h('span', {}, 'Nombre para el análisis'),
+            h('button', {
+                class: 'link-btn', type: 'button',
+                onclick: () => { if (file) { displayName.value = baseName(file.name); updateSummary(); } },
+            }, 'Restablecer nombre'),
+        ),
+        displayName,
+        h('span', { class: 'field-label-row' }, h('span', { class: 'muted' }, 'Guardar como')),
+        formatBox,
+    );
+    displayName.addEventListener('input', updateSummary);
     const dropzone = h('div', {
         class: 'dropzone',
         onclick: () => fileInput.click(),
@@ -36,6 +55,22 @@ export function render(container, { navigate }) {
 
     const engineBox = h('div', { class: 'engine-choice' });
     const modelBox = h('div', { class: 'model-box' });
+    const accessHint = h('div', { class: 'alert warning', hidden: true });
+    const modelPicker = createModelPicker({
+        placeholder: 'Buscar modelo para OCR…',
+        onSelect: (model) => { selectedModel = model.id; },
+        meta: (model) => {
+            const active = providers?.active_provider || 'local';
+            if (['external', 'opencode'].includes(active)) {
+                return h('span', { class: 'badge' }, providerTitle());
+            }
+            return [
+                h('span', { class: `badge ${model.loaded ? 'loaded' : 'unloaded'}` }, model.loaded ? 'Cargado' : 'No cargado'),
+                model.vision ? h('span', { class: 'badge vision' }, 'Visión') : null,
+                model.context ? h('span', { class: 'badge' }, `${Math.round(model.context / 1000)}k ctx`) : null,
+            ];
+        },
+    });
     const profile = h('select', {},
         h('option', { value: 'cand' }, 'cand (recomendado)'),
         h('option', { value: 'legacy' }, 'legacy'),
@@ -53,6 +88,8 @@ export function render(container, { navigate }) {
         h('label', { class: 'field' }, 'DPI', dpi),
         h('label', { class: 'field' }, 'Páginas', pages),
     );
+    const nonPdfHint = h('div', { class: 'alert info', hidden: true },
+        'Las opciones de perfil OCR, DPI y páginas solo aplican a archivos PDF.');
     const submit = h('button', { class: 'btn primary', type: 'submit', disabled: true }, icon('upload'), 'Procesar archivo');
     const actionSummary = h('div', { class: 'wizard-summary' });
     const form = h('form', { onsubmit: (event) => { event.preventDefault(); startJob(); } }, submit);
@@ -60,15 +97,15 @@ export function render(container, { navigate }) {
 
     const stepFile = h('section', { class: 'step-card' },
         h('div', { class: 'step-head' }, h('span', { class: 'step-num' }, '1'), h('h2', {}, 'Archivo')),
-        dropzone, fileInput,
+        dropzone, fileInput, displayNameWrap,
     );
     const stepEngine = h('section', { class: 'step-card' },
         h('div', { class: 'step-head' }, h('span', { class: 'step-num' }, '2'), h('h2', {}, 'Motor OCR')),
-        engineBox, modelBox,
+        engineBox, accessHint, modelBox,
     );
     const stepOptions = h('section', { class: 'step-card' },
         h('div', { class: 'step-head' }, h('span', { class: 'step-num' }, '3'), h('h2', {}, 'Opciones')),
-        pdfOptions,
+        pdfOptions, nonPdfHint,
     );
 
     const progressBar = h('div', { class: 'progress' }, h('div', { style: 'width:0%' }));
@@ -95,6 +132,7 @@ export function render(container, { navigate }) {
                 h('div', {},
                     h('h2', {}, 'Documentos cargados'),
                     h('p', { class: 'muted' }, 'Los archivos originales se conservan aunque borres un trabajo OCR.')),
+                h('button', { class: 'btn outline sm', type: 'button', onclick: loadDocuments }, icon('refresh'), 'Actualizar'),
             ),
             documentsBox,
         ),
@@ -110,12 +148,52 @@ export function render(container, { navigate }) {
     loadDocuments();
     updateSummary();
 
+    function paidBlocked() {
+        return Boolean(providers?.paid_provider && providers?.paid_access === false);
+    }
+
+    function providerTitle() {
+        const active = providers?.active_provider || 'local';
+        if (active === 'opencode') return 'OpenCode Go';
+        if (active === 'external') return 'API externa';
+        return 'IA local';
+    }
+
+    function engineOptions() {
+        const active = providers?.active_provider || 'local';
+        const blocked = paidBlocked();
+        const ai = active === 'local'
+            ? { title: 'IA local', detail: 'Modelo de visión en llama.cpp' }
+            : { title: `IA de pago · ${providerTitle()}`, detail: 'Modelo de visión mediante API' };
+        return BASE_ENGINES.map((option) => {
+            if (option.id === 'ai') return { ...option, ...ai, disabled: blocked };
+            if (option.id === 'compare') {
+                return {
+                    ...option,
+                    detail: blocked ? 'Requiere acceso a modelos de pago' : 'Ejecuta local e IA y contrasta',
+                    disabled: blocked,
+                };
+            }
+            return option;
+        });
+    }
+
     function renderEngineChoices() {
         clear(engineBox);
-        for (const option of ENGINES) {
-            const choice = h('label', { class: `choice ${engine === option.id ? 'selected' : ''}` },
+        const options = engineOptions();
+        if (paidBlocked() && engine !== 'local') {
+            engine = 'local';
+        }
+        accessHint.hidden = !paidBlocked();
+        if (paidBlocked()) {
+            clear(accessHint);
+            accessHint.append('El administrador no ha habilitado tu acceso a los modelos de pago. Puedes usar OCR local.');
+        }
+        for (const option of options) {
+            const choice = h('label', { class: `choice ${engine === option.id ? 'selected' : ''} ${option.disabled ? 'disabled' : ''}` },
                 h('input', {
                     type: 'radio', name: 'engine', value: option.id, checked: engine === option.id,
+                    disabled: Boolean(option.disabled),
                     onchange: () => { engine = option.id; renderEngineChoices(); updateModelVisibility(); updateSummary(); },
                 }),
                 h('span', { class: 'choice-icon' }, icon(option.icon, 18)),
@@ -131,11 +209,46 @@ export function render(container, { navigate }) {
         if (ai) renderModels();
     }
 
+    function baseName(name) {
+        return String(name || '').replace(/\.[^.]+$/, '');
+    }
+
+    function fileFormat() {
+        const ext = String(file?.name || '').split('.').pop().toLowerCase();
+        return ext === 'pdf' ? 'pdf' : (ext === 'xls' ? 'xls' : 'xlsx');
+    }
+
+    function renderFormatChoices() {
+        clear(formatBox);
+        const original = fileFormat();
+        const options = [
+            { id: 'pdf', label: 'PDF' },
+            { id: 'xlsx', label: 'XLSX' },
+            { id: 'xls', label: 'XLS' },
+        ];
+        for (const option of options) {
+            const compatible = original === 'pdf' ? option.id === 'pdf' : option.id !== 'pdf';
+            formatBox.append(h('button', {
+                type: 'button',
+                class: `format-choice-btn${displayFormat === option.id ? ' selected' : ''}`,
+                disabled: !compatible,
+                title: compatible ? `Guardar como .${option.id}` : `No compatible con ${original.toUpperCase()}`,
+                onclick: () => { displayFormat = option.id; renderFormatChoices(); updateSummary(); },
+            }, option.label));
+        }
+    }
+
+    function finalDisplayName() {
+        const base = displayName.value.trim().replace(new RegExp(`\\.${displayFormat}$`, 'i'), '');
+        return `${base}.${displayFormat}`;
+    }
+
     function updateSummary() {
-        const option = ENGINES.find((item) => item.id === engine) || ENGINES[0];
+        const option = engineOptions().find((item) => item.id === engine) || engineOptions()[0];
         clear(actionSummary);
+        const name = file ? (displayName.value.trim() ? finalDisplayName() : file.name) : 'Ningún archivo seleccionado';
         actionSummary.append(
-            h('strong', {}, file ? file.name : 'Ningún archivo seleccionado'),
+            h('strong', {}, name),
             h('span', { class: 'muted' }, file
                 ? `${formatSize(file.size)} · ${option.title}`
                 : 'Elige un PDF o Excel y el motor de OCR'),
@@ -152,68 +265,74 @@ export function render(container, { navigate }) {
     function setFile(selected) {
         file = selected;
         fileName.textContent = `${selected.name} · ${formatSize(selected.size)}`;
+        displayName.value = baseName(selected.name);
+        displayFormat = fileFormat();
+        renderFormatChoices();
+        displayNameWrap.hidden = false;
         pdfOptions.hidden = !selected.name.toLowerCase().endsWith('.pdf');
+        nonPdfHint.hidden = !pdfOptions.hidden;
         if (pdfOptions.hidden) { engine = 'local'; renderEngineChoices(); updateModelVisibility(); }
         updateSummary();
     }
 
-    let providers = null;
     async function loadProviders(refresh = false) {
         try {
             providers = await api(`/api/ai/providers${refresh ? '?refresh=1' : ''}`);
-            renderModels();
+            renderEngineChoices();
+            updateModelVisibility();
         } catch (error) {
-            providers = { local: { reachable: false, models: [], error: error.message } };
-            renderModels();
+            providers = {
+                local: { reachable: false, models: [], error: error.message },
+                external: { models: [] },
+                active_provider: 'local',
+                paid_provider: false,
+                paid_access: true,
+            };
+            renderEngineChoices();
+            updateModelVisibility();
         }
     }
 
     function renderModels() {
         if (engine === 'local') { modelBox.innerHTML = ''; return; }
         clear(modelBox);
-        const externalActive = providers?.active_provider === 'external' && providers?.external?.configured;
-        const source = externalActive ? providers.external : (providers?.local || {});
+        if (paidBlocked()) return;
+        const active = providers?.active_provider || 'local';
+        const apiActive = ['external', 'opencode'].includes(active) && providers?.external?.configured;
+        const source = apiActive ? providers.external : (providers?.local || {});
         const models = source.models || [];
         if (!models.length) {
             modelBox.append(
                 h('div', { class: 'alert warning' },
-                    h('strong', {}, externalActive ? 'No hay modelos en el proveedor externo. ' : 'No se detectó un modelo local. '),
-                    source.error || (externalActive ? 'Configúralo en Configuración.' : 'Revisa que llama.cpp esté levantado.'),
+                    h('strong', {}, apiActive ? `No hay modelos en ${providerTitle()}. ` : 'No se detectó un modelo local. '),
+                    source.error || (apiActive ? 'Configúralo en Configuración.' : 'Revisa que llama.cpp esté levantado.'),
                 ),
                 h('div', { class: 'btn-row' },
                     h('button', { class: 'btn outline sm', type: 'button', onclick: () => loadProviders(true) }, icon('refresh'), 'Escanear de nuevo'),
                 ),
-                externalActive ? null : h('p', { class: 'muted' }, 'Servidor esperado: ' + (source.default_url || 'http://host.containers.internal:9931/v1')),
+                apiActive ? null : h('p', { class: 'muted' }, 'Servidor esperado: ' + (source.default_url || 'http://host.containers.internal:9931/v1')),
             );
             return;
         }
+        const configured = apiActive ? providers?.external?.selected : providers?.local?.selected;
         const preferred = models.find((model) => model.id === selectedModel)
+            || models.find((model) => model.id === configured)
             || models.find((model) => model.loaded && model.vision)
             || models.find((model) => model.loaded)
             || models[0];
         selectedModel = preferred.id;
-        modelBox.append(h('div', { class: 'section-title' }, externalActive ? 'Modelos del proveedor externo' : 'Modelo detectado'));
-        for (const model of models) {
-            modelBox.append(h('label', { class: `choice ${selectedModel === model.id ? 'selected' : ''}` },
-                h('input', {
-                    type: 'radio', name: 'model', checked: selectedModel === model.id,
-                    onchange: () => { selectedModel = model.id; renderModels(); },
-                }),
-                h('span', { style: 'flex:1;min-width:0' },
-                    h('strong', {}, model.id),
-                    h('span', { class: 'btn-row', style: 'margin-top:0.25rem;gap:0.3rem' },
-                        externalActive
-                            ? h('span', { class: 'badge' }, 'Externo')
-                            : h('span', { class: `badge ${model.loaded ? 'loaded' : 'unloaded'}` }, model.loaded ? 'Cargado' : 'No cargado'),
-                        model.vision ? h('span', { class: 'badge vision' }, 'Visión') : null,
-                        model.context ? h('span', { class: 'badge' }, `${Math.round(model.context / 1000)}k ctx`) : null,
-                    ),
-                ),
-            ));
+        modelPicker.setModels(models, selectedModel);
+        selectedModel = modelPicker.getSelected();
+        modelBox.append(
+            h('div', { class: 'section-title' }, apiActive ? `Modelos · ${providerTitle()}` : 'Modelo detectado'),
+            modelPicker.root,
+        );
+        if (apiActive) {
+            modelBox.append(h('p', { class: 'muted' }, 'Elige un modelo con visión. Si no la admite, “Probar conexión” fallará en Configuración.'));
         }
         modelBox.append(h('div', { class: 'btn-row' },
             h('button', { class: 'btn outline sm', type: 'button', onclick: () => loadProviders(true) }, icon('refresh'), 'Escanear de nuevo'),
-            h('span', { class: 'model-status ok' }, `${externalActive ? 'Proveedor' : 'Servidor'}: ${source.base_url || ''}`),
+            h('span', { class: 'model-status ok' }, `${apiActive ? 'Proveedor' : 'Servidor'}: ${source.base_url || ''}`),
         ));
     }
 
@@ -227,11 +346,21 @@ export function render(container, { navigate }) {
         progressBar.firstChild.style.width = '0%';
         clear(logBox);
         progressCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        notifyDataChanged();
+        loadDocuments();
         poll();
     }
 
     async function startJob() {
         if (!file) { toast('Selecciona un archivo primero', 'warning'); return; }
+        if (!displayName.value.trim()) {
+            toast('Escribe un nombre para el documento', 'warning');
+            return;
+        }
+        if (engine !== 'local' && paidBlocked()) {
+            toast('El administrador no ha habilitado tu acceso a modelos de pago', 'warning');
+            return;
+        }
         if (engine !== 'local' && !selectedModel) {
             toast('Selecciona un modelo de IA disponible', 'warning');
             return;
@@ -241,6 +370,7 @@ export function render(container, { navigate }) {
             const formData = new FormData();
             formData.append('file', file);
             formData.append('engine', engine);
+            formData.append('display_name', finalDisplayName());
             if (!pdfOptions.hidden) {
                 if (profile.value) formData.append('profile', profile.value);
                 if (dpi.value) formData.append('dpi', dpi.value);
@@ -269,7 +399,9 @@ export function render(container, { navigate }) {
                 statusBadge(job.status),
                 h('span', { class: 'muted' }, `${job.progress || 0}%`),
                 job.total_pages ? h('span', { class: 'muted' }, `${job.total_pages} páginas`) : null,
-                job.ai_used ? h('span', { class: 'badge vision' }, 'IA usada') : null,
+                job.ai_used
+                    ? h('span', { class: 'badge vision' }, 'IA usada')
+                    : (job.engine === 'ai' ? h('span', { class: 'badge-status warning' }, 'Fallback local') : null),
             ));
             if (job.error) progressInfo.append(h('div', { class: 'alert error' }, job.error));
             const events = await api(`/api/jobs/${jobId}/events?limit=30`);
@@ -282,7 +414,7 @@ export function render(container, { navigate }) {
             resultsBtn.hidden = !final || job.status !== 'done' || job.engine === 'compare';
             compareBtn.hidden = !final || job.engine !== 'compare';
             if (!final) timer = setTimeout(poll, 1500);
-            else loadRecent();
+            else { loadRecent(); loadDocuments(); }
         } catch (error) {
             toast(error.message, 'error');
         }
@@ -294,6 +426,15 @@ export function render(container, { navigate }) {
             toast('Cancelación solicitada', 'warning');
             poll();
         } catch (error) { toast(error.message, 'error'); }
+    }
+
+    function recentEngine(job) {
+        return h('span', {},
+            job.engine,
+            job.engine === 'ai' && !job.ai_used
+                ? h('span', { class: 'badge-status warning', style: 'margin-left:0.35rem' }, 'Fallback local')
+                : null,
+        );
     }
 
     async function loadRecent() {
@@ -309,7 +450,7 @@ export function render(container, { navigate }) {
                 tbody.append(h('tr', { class: 'row-click', onclick: () => navigate(job.engine === 'compare' ? `comparar?job=${job.id}` : `datos?job=${job.id}`) },
                     h('td', {}, fmtDateTime(job.created_at)),
                     h('td', {}, job.filename),
-                    h('td', {}, job.engine),
+                    h('td', {}, recentEngine(job)),
                     h('td', {}, statusBadge(job.status)),
                     h('td', { class: 'num' }, job.row_count),
                 ));
@@ -324,12 +465,73 @@ export function render(container, { navigate }) {
             for (const job of data.items) {
                 cards.append(h('div', { class: 'mobile-card' },
                     h('div', { class: 'mc-head' }, h('strong', {}, job.filename), statusBadge(job.status)),
-                    h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, job.engine)),
+                    h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, recentEngine(job))),
                     h('div', { class: 'mc-row' }, h('span', {}, 'Filas'), h('span', {}, job.row_count)),
                 ));
             }
             recent.append(cards);
         } catch (error) { toast(error.message, 'error'); }
+    }
+
+    function documentMenu(document) {
+        return actionMenu([
+            { label: 'Renombrar', onClick: () => renameDocument(document) },
+            { label: 'Borrar documento', danger: true, onClick: () => deleteDocument(document) },
+        ]);
+    }
+
+    function renameDocument(document) {
+        const base = document.filename.replace(/\.[^.]+$/, '');
+        const originalExt = String(document.filename).split('.').pop().toLowerCase();
+        let format = document.kind === 'pdf' ? 'pdf' : (originalExt === 'xls' ? 'xls' : 'xlsx');
+        const name = h('input', { type: 'text', value: base, maxlength: '115', placeholder: 'Nombre sin extensión' });
+        const formatBox = h('div', { class: 'format-choice' });
+        const message = h('div', {});
+        const renderFormats = () => {
+            clear(formatBox);
+            for (const option of [
+                { id: 'pdf', label: 'PDF' },
+                { id: 'xlsx', label: 'XLSX' },
+                { id: 'xls', label: 'XLS' },
+            ]) {
+                const compatible = document.kind === 'pdf' ? option.id === 'pdf' : option.id !== 'pdf';
+                formatBox.append(h('button', {
+                    type: 'button',
+                    class: `format-choice-btn${format === option.id ? ' selected' : ''}`,
+                    disabled: !compatible,
+                    onclick: () => { format = option.id; renderFormats(); },
+                }, option.label));
+            }
+        };
+        renderFormats();
+        modal(`Renombrar · ${document.filename}`, h('div', { class: 'stack' },
+            h('p', { class: 'muted' }, 'El nombre se actualizará en Cargar, Historial, Datos e Inicio.'),
+            h('label', { class: 'field' }, 'Nombre', name),
+            h('span', { class: 'field-label-row' }, h('span', { class: 'muted' }, 'Extensión')),
+            formatBox,
+            message,
+        ), [{
+            label: 'Guardar', class: 'primary',
+            onClick: async (close) => {
+                clear(message);
+                if (!name.value.trim()) {
+                    message.append(h('div', { class: 'alert error' }, 'Escribe un nombre'));
+                    return;
+                }
+                try {
+                    await api(`/api/documents/${document.id}`, {
+                        method: 'PATCH',
+                        body: { filename: `${name.value.trim()}.${format}` },
+                    });
+                    toast('Documento renombrado', 'success');
+                    close();
+                    notifyDataChanged();
+                    await Promise.all([loadDocuments(), loadRecent()]);
+                } catch (error) {
+                    message.append(h('div', { class: 'alert error' }, error.message));
+                }
+            },
+        }]);
     }
 
     async function loadDocuments() {
@@ -343,23 +545,24 @@ export function render(container, { navigate }) {
                 ));
                 return;
             }
+            const showUser = user?.role === 'admin';
             const tbody = h('tbody', {});
             for (const document of data.items) {
                 const last = document.last_job;
                 tbody.append(h('tr', {},
                     h('td', {}, fmtDateTime(document.created_at)),
                     h('td', {}, h('strong', {}, document.filename),
-                        h('div', { class: 'muted' }, document.kind === 'pdf' ? 'PDF' : 'Excel')),
+                        h('div', { class: 'muted' }, document.kind === 'pdf' ? 'PDF' : 'Excel'),
+                        document.original_filename && document.original_filename !== document.filename
+                            ? h('div', { class: 'muted' }, `Original: ${document.original_filename}`)
+                            : null),
                     h('td', { class: 'num' }, formatSize(document.size)),
                     h('td', { class: 'num' }, document.job_count),
+                    showUser ? h('td', {}, document.user || '—') : '',
                     h('td', {}, last ? statusBadge(last.status) : h('em', {}, 'Sin trabajos')),
                     h('td', {}, h('div', { class: 'table-actions' },
                         h('button', { class: 'btn outline sm', onclick: () => reprocessDocument(document) }, 'Procesar'),
-                        actionMenu([{
-                            label: 'Borrar documento',
-                            danger: true,
-                            onClick: () => deleteDocument(document),
-                        }]),
+                        documentMenu(document),
                     )),
                 ));
             }
@@ -367,7 +570,8 @@ export function render(container, { navigate }) {
                 h('table', {},
                     h('thead', {}, h('tr', {},
                         h('th', {}, 'Fecha'), h('th', {}, 'Documento'), h('th', { class: 'num' }, 'Tamaño'),
-                        h('th', { class: 'num' }, 'Trabajos'), h('th', {}, 'Último estado'), h('th', {}, 'Acciones'),
+                        h('th', { class: 'num' }, 'Trabajos'), showUser ? h('th', {}, 'Usuario') : '',
+                        h('th', {}, 'Último estado'), h('th', {}, 'Acciones'),
                     )),
                     tbody,
                 ),
@@ -383,13 +587,10 @@ export function render(container, { navigate }) {
                     h('div', { class: 'mc-row' }, h('span', {}, 'Fecha'), h('span', {}, fmtDateTime(document.created_at))),
                     h('div', { class: 'mc-row' }, h('span', {}, 'Tamaño'), h('span', {}, formatSize(document.size))),
                     h('div', { class: 'mc-row' }, h('span', {}, 'Trabajos'), h('span', {}, document.job_count)),
+                    user?.role === 'admin' ? h('div', { class: 'mc-row' }, h('span', {}, 'Usuario'), h('span', {}, document.user || '—')) : '',
                     h('div', { class: 'btn-row', style: 'margin-top:0.7rem' },
                         h('button', { class: 'btn outline sm', onclick: () => reprocessDocument(document) }, 'Procesar'),
-                        actionMenu([{
-                            label: 'Borrar documento',
-                            danger: true,
-                            onClick: () => deleteDocument(document),
-                        }]),
+                        documentMenu(document),
                     ),
                 ));
             }
@@ -401,11 +602,15 @@ export function render(container, { navigate }) {
     }
 
     function reprocessDocument(document) {
+        const blocked = paidBlocked();
         const engineSelect = h('select', {},
             h('option', { value: 'local' }, 'Local · Tesseract + OpenCV'),
-            h('option', { value: 'ai' }, 'IA local · modelo de visión'),
-            h('option', { value: 'compare' }, 'Comparar local e IA'),
+            h('option', { value: 'ai', disabled: blocked }, `${providerTitle()} · modelo de visión`),
+            h('option', { value: 'compare', disabled: blocked }, 'Comparar local e IA'),
         );
+        if (blocked) {
+            engineSelect.title = 'El administrador no ha habilitado tu acceso a modelos de pago';
+        }
         const message = h('div', {});
         modal(`Procesar de nuevo · ${document.filename}`, h('div', { class: 'stack' },
             h('p', { class: 'muted' }, 'Se reutiliza el archivo original; no hace falta volver a subirlo.'),
@@ -415,6 +620,9 @@ export function render(container, { navigate }) {
             label: 'Procesar', class: 'primary',
             onClick: async (close) => {
                 try {
+                    if (engineSelect.value !== 'local' && paidBlocked()) {
+                        throw new Error('El administrador no ha habilitado tu acceso a modelos de pago');
+                    }
                     const data = await api(`/api/documents/${document.id}/jobs`, {
                         method: 'POST',
                         body: {
@@ -441,12 +649,17 @@ export function render(container, { navigate }) {
         ))) return;
         try {
             await api(`/api/documents/${document.id}`, { method: 'DELETE' });
-            toast('Documento y trabajos eliminados', 'success');
+            toast('Documento eliminado', 'success');
+            notifyDataChanged();
             await Promise.all([loadDocuments(), loadRecent()]);
         } catch (error) { toast(error.message, 'error'); }
     }
 
+    const stopWatch = watchDataChanges(() => {
+        loadRecent();
+        loadDocuments();
+    });
     updateModelVisibility();
 
-    return { destroy() { clearTimeout(timer); } };
+    return { destroy() { clearTimeout(timer); modelPicker.destroy(); stopWatch(); } };
 }

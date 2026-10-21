@@ -22,6 +22,10 @@ class SettingsStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         if self.key_path.exists():
             key = self.key_path.read_bytes().strip()
+            try:
+                os.chmod(self.key_path, 0o600)
+            except OSError:
+                pass
         else:
             key = Fernet.generate_key()
             self.key_path.write_bytes(key)
@@ -73,6 +77,7 @@ class SettingsStore:
                 "api_key_masked": "",
                 "local_path": "",
                 "base_url": "",
+                "models_url": "",
                 "model": "",
                 "updated_at": "",
             }
@@ -82,6 +87,7 @@ class SettingsStore:
             "api_key_masked": self.mask_key(data.get("api_key", "")),
             "local_path": data.get("local_path", ""),
             "base_url": data.get("base_url", ""),
+            "models_url": data.get("models_url", ""),
             "model": data.get("model", ""),
             "updated_at": data.get("updated_at", ""),
         }

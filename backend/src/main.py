@@ -59,6 +59,7 @@ async def auth_guard(request: Request, call_next):
 @app.on_event("startup")
 async def _startup():
     auth.bootstrap()
+    ai_ocr.migrate_open_code_go()
     jobs.start_workers()
 
 
@@ -79,6 +80,15 @@ class PasswordChangeIn(BaseModel):
     new: str
 
 
+class PasswordVerifyIn(BaseModel):
+    password: str
+
+
+class DeleteAllIn(BaseModel):
+    password: str
+    include_documents: bool = True
+
+
 class UserIn(BaseModel):
     username: str
     password: str
@@ -89,6 +99,18 @@ class UserPatch(BaseModel):
     role: Optional[str] = None
     active: Optional[bool] = None
     password: Optional[str] = None
+    paid_ai: Optional[bool] = None
+
+
+class PaidAccessIn(BaseModel):
+    enabled: bool
+
+
+class BulkDeleteIn(BaseModel):
+    date_from: str
+    date_to: str
+    user_id: Optional[int] = None
+    include_documents: bool = False
 
 
 class DocumentJobIn(BaseModel):
@@ -99,11 +121,16 @@ class DocumentJobIn(BaseModel):
     model: str = ""
 
 
+class DocumentRenameIn(BaseModel):
+    filename: str
+
+
 class AISettingsIn(BaseModel):
     provider: str = "local"
     api_key: str = ""
     local_path: str = ""
     base_url: str = ""
+    models_url: str = ""
     model: str = ""
 
 
@@ -137,6 +164,24 @@ def ai_public(used: bool) -> dict:
     }
 
 
+def _provider_kind() -> str:
+    return (STORE.load() or {}).get("provider", "local")
+
+
+def require_ai_access(user: dict, engine: str) -> None:
+    if engine not in ("ai", "compare"):
+        return
+    if user.get("role") == "admin":
+        return
+    if _provider_kind() not in ai_ocr.PAID_PROVIDERS:
+        return
+    if not user.get("paid_ai"):
+        raise HTTPException(
+            403,
+            "El administrador no ha habilitado tu acceso a los modelos de pago",
+        )
+
+
 # ------------------------------------------------------------------- auth
 
 @app.get("/api/auth/status")
@@ -145,7 +190,10 @@ async def auth_status(request: Request):
     return {
         "setup": auth.is_setup(),
         "authenticated": bool(user),
-        "user": {"username": user["username"], "role": user["role"]} if user else None,
+        "user": {
+            "username": user["username"], "role": user["role"],
+            "paid_ai": bool(user.get("paid_ai")),
+        } if user else None,
     }
 
 
@@ -172,7 +220,8 @@ async def auth_login(data: CredentialsIn, request: Request, response: Response):
     token = auth.create_session(user["id"], request, data.remember)
     auth.set_session_cookie(response, token, data.remember)
     db.audit(user["id"], "login", user["username"], f"ip={ip}")
-    return {"ok": True, "username": user["username"], "role": user["role"]}
+    return {"ok": True, "username": user["username"], "role": user["role"],
+            "paid_ai": bool(user.get("paid_ai"))}
 
 
 @app.post("/api/auth/logout")
@@ -185,9 +234,17 @@ async def auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+@app.post("/api/auth/verify-password", dependencies=[Depends(auth.require_auth)])
+async def auth_verify_password(data: PasswordVerifyIn, user: dict = Depends(auth.require_auth)):
+    if not auth.verify_user_password(user["id"], data.password):
+        raise HTTPException(403, "Contraseña incorrecta")
+    return {"ok": True}
+
+
 @app.get("/api/auth/me", dependencies=[Depends(auth.require_auth)])
 async def auth_me(user: dict = Depends(auth.require_auth)):
-    return {"username": user["username"], "role": user["role"]}
+    return {"username": user["username"], "role": user["role"],
+            "paid_ai": bool(user.get("paid_ai"))}
 
 
 @app.post("/api/auth/change-password", dependencies=[Depends(auth.require_auth)])
@@ -215,10 +272,21 @@ async def post_user(data: UserIn, user: dict = Depends(auth.require_role("admin"
 async def patch_user(user_id: int, data: UserPatch, user: dict = Depends(auth.require_role("admin"))):
     if user_id == user["id"] and data.active is False:
         raise HTTPException(400, "No puedes desactivar tu propia cuenta")
-    auth.update_user(user_id, role=data.role, active=data.active, password=data.password)
+    auth.update_user(user_id, role=data.role, active=data.active, password=data.password,
+                     paid_ai=data.paid_ai)
     db.audit(user["id"], "user_update", str(user_id),
-             f"role={data.role} active={data.active} password={'set' if data.password else 'no'}")
+             f"role={data.role} active={data.active} paid_ai={data.paid_ai} "
+             f"password={'set' if data.password else 'no'}")
     return {"ok": True}
+
+
+@app.post("/api/users/paid-access", dependencies=[Depends(auth.require_role("admin"))])
+async def set_all_paid_access(data: PaidAccessIn, user: dict = Depends(auth.require_role("admin"))):
+    updated = len(db.query("SELECT id FROM users WHERE role<>'admin'"))
+    db.execute("UPDATE users SET paid_ai=? WHERE role<>'admin'", (1 if data.enabled else 0,))
+    db.audit(user["id"], "user_paid_access_all", "all",
+             f"enabled={data.enabled} affected={updated}")
+    return {"ok": True, "enabled": data.enabled, "affected": updated}
 
 
 @app.delete("/api/users/{user_id}", dependencies=[Depends(auth.require_role("admin"))])
@@ -240,6 +308,7 @@ async def create_job(
     dpi: str = Form(""),
     pages: str = Form(""),
     model: str = Form(""),
+    display_name: str = Form(""),
     user: dict = Depends(auth.require_role("admin", "usuario")),
 ):
     if not file.filename:
@@ -256,6 +325,7 @@ async def create_job(
         raise HTTPException(413, "El archivo supera los 50 MB")
     if kind == "pdf" and not content.startswith(b"%PDF"):
         raise HTTPException(400, "El archivo no parece un PDF válido")
+    require_ai_access(user, engine)
     params = {}
     if profile:
         params["profile"] = profile
@@ -265,8 +335,18 @@ async def create_job(
         params["pages"] = pages
     if model:
         params["model"] = model
-    job_id = jobs.create_upload_job(user["id"], file.filename, content, kind, engine, params)
-    db.audit(user["id"], "job_create", job_id, f"{file.filename} engine={engine}")
+    try:
+        allowed = (".pdf",) if kind == "pdf" else (".xlsx", ".xls")
+        display = jobs.clean_display_name(
+            display_name or file.filename, file.filename, allowed,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    job_id = jobs.create_upload_job(
+        user["id"], file.filename, content, kind, engine, params,
+        display_name=display, original_filename=file.filename,
+    )
+    db.audit(user["id"], "job_create", job_id, f"{display} engine={engine}")
     return {"id": job_id}
 
 
@@ -290,11 +370,20 @@ async def create_document_job(document_id: str, data: DocumentJobIn,
         params["pages"] = data.pages
     if data.model:
         params["model"] = data.model
+    require_ai_access(user, data.engine)
     job_id = jobs.create_job_from_document(
         document_id, user["id"], data.engine, params, user=user
     )
     db.audit(user["id"], "job_create", job_id, f"document={document_id} engine={data.engine}")
     return {"id": job_id}
+
+
+@app.patch("/api/documents/{document_id}", dependencies=[Depends(auth.require_role("admin", "usuario"))])
+async def rename_document(document_id: str, data: DocumentRenameIn,
+                          user: dict = Depends(auth.require_role("admin", "usuario"))):
+    filename = jobs.rename_document(document_id, data.filename, user=user)
+    db.audit(user["id"], "document_rename", document_id, filename)
+    return {"ok": True, "filename": filename}
 
 
 @app.delete("/api/documents/{document_id}", dependencies=[Depends(auth.require_role("admin", "usuario"))])
@@ -317,6 +406,15 @@ async def get_job(job_id: str, user: dict = Depends(auth.require_auth)):
     return jobs.get_job(job_id, user=user)
 
 
+@app.get("/api/jobs/{job_id}/pages/{page}/image", dependencies=[Depends(auth.require_auth)])
+def get_page_image(job_id: str, page: int, user: dict = Depends(auth.require_auth)):
+    path = jobs.page_image(job_id, page, user=user)
+    return FileResponse(
+        str(path), media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=600"},
+    )
+
+
 @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(auth.require_auth)])
 async def get_job_events(job_id: str, limit: int = 50,
                          user: dict = Depends(auth.require_auth)):
@@ -337,6 +435,8 @@ async def retry_job(job_id: str, request: Request, user: dict = Depends(auth.req
         body = await request.json()
     except ValueError:
         body = {}
+    current = jobs._require_job(job_id, user)
+    require_ai_access(user, body.get("engine") or current["engine"])
     new_id = jobs.retry_job(job_id, user["id"], body.get("engine"), user=user)
     db.audit(user["id"], "job_retry", new_id, f"from={job_id}")
     return {"id": new_id}
@@ -350,6 +450,31 @@ async def remove_job(job_id: str, user: dict = Depends(auth.require_auth)):
     jobs.delete_job(job_id, user=user)
     db.audit(user["id"], "job_delete", job_id, job["filename"])
     return {"ok": True}
+
+
+@app.post("/api/jobs/delete-all", dependencies=[Depends(auth.require_role("admin"))])
+async def delete_all(data: DeleteAllIn, user: dict = Depends(auth.require_role("admin"))):
+    if not auth.verify_user_password(user["id"], data.password):
+        raise HTTPException(403, "Contraseña incorrecta")
+    result = jobs.delete_all_jobs(data.include_documents)
+    db.audit(user["id"], "jobs_delete_all", "all",
+             f"jobs={result['jobs']} documents={result['documents']}")
+    return result
+
+
+@app.get("/api/jobs/bulk-delete/preview", dependencies=[Depends(auth.require_role("admin"))])
+async def preview_bulk_delete(date_from: str, date_to: str, user_id: Optional[int] = None):
+    return jobs.bulk_delete_preview(date_from, date_to, user_id)
+
+
+@app.post("/api/jobs/bulk-delete", dependencies=[Depends(auth.require_role("admin"))])
+async def delete_bulk_jobs(data: BulkDeleteIn, user: dict = Depends(auth.require_role("admin"))):
+    result = jobs.bulk_delete_jobs(
+        data.date_from, data.date_to, data.user_id, data.include_documents
+    )
+    db.audit(user["id"], "jobs_bulk_delete", f"{data.date_from}/{data.date_to}",
+             f"user_id={data.user_id} jobs={result['jobs']} docs={result['documents']}")
+    return result
 
 
 @app.get("/api/jobs/{job_id}/results", dependencies=[Depends(auth.require_auth)])
@@ -419,25 +544,43 @@ async def get_ai_settings():
 async def put_ai_settings(data: AISettingsIn, user: dict = Depends(auth.require_role("admin"))):
     current = STORE.load() or {}
     provider = (data.provider or "local").strip().lower()
-    if provider not in ("local", "external"):
+    if provider not in ("local", "external", "opencode"):
         raise HTTPException(400, "Proveedor no válido")
+    same_provider = current.get("provider") == provider
     base_url = ai_ocr._normalize_base(data.base_url) if data.base_url.strip() else ""
-    if not base_url and current.get("provider") == provider:
+    if not base_url and same_provider:
         base_url = current.get("base_url", "")
+    if provider == "opencode" and not base_url:
+        base_url = ai_ocr.OPENCODE_BASE_URL
     if base_url and not base_url.startswith(("http://", "https://")):
         raise HTTPException(400, "La URL base debe iniciar con http:// o https://")
     if provider == "external" and not base_url:
         raise HTTPException(400, "El proveedor externo requiere URL base")
+
+    models_url = ai_ocr._normalize_base(data.models_url) if data.models_url.strip() else ""
+    if provider == "opencode":
+        if not models_url and same_provider:
+            models_url = current.get("models_url", "")
+        models_url = models_url or ai_ocr.OPENCODE_MODELS_URL
+    elif not models_url and same_provider:
+        models_url = current.get("models_url", "")
+    if models_url and not models_url.startswith(("http://", "https://")):
+        raise HTTPException(400, "La URL de modelos debe iniciar con http:// o https://")
+
     api_key = data.api_key.strip()
-    if not api_key and current.get("provider") == provider:
+    if not api_key and same_provider:
         api_key = current.get("api_key", "")
+    if provider == "opencode" and not api_key:
+        raise HTTPException(400, "OpenCode requiere API key")
     if provider == "local":
         api_key = ""
+        models_url = ""
     saved = {
         "provider": provider,
         "api_key": api_key,
         "local_path": data.local_path.strip() or current.get("local_path", ""),
         "base_url": base_url,
+        "models_url": models_url,
         "model": data.model.strip(),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -459,10 +602,16 @@ async def delete_ai_settings(user: dict = Depends(auth.require_role("admin"))):
 
 
 @app.get("/api/ai/providers", dependencies=[Depends(auth.require_auth)])
-async def ai_providers(refresh: int = 0):
+async def ai_providers(refresh: int = 0, user: dict = Depends(auth.require_auth)):
     if refresh:
         ai_ocr._cache["ts"] = 0.0
-    return ai_ocr.providers()
+    data = ai_ocr.providers()
+    access = user.get("role") == "admin" or bool(user.get("paid_ai"))
+    data["paid_access"] = access
+    if data.get("paid_provider") and not access:
+        data["external"]["models"] = []
+        data["external"]["error"] = "El administrador no ha habilitado tu acceso a los modelos de pago"
+    return data
 
 
 @app.post("/api/settings/ai/test", dependencies=[Depends(auth.require_role("admin"))])
@@ -473,16 +622,19 @@ async def test_ai_settings():
 class AIModelsIn(BaseModel):
     base_url: str
     api_key: str = ""
+    models_url: str = ""
 
 
 @app.post("/api/settings/ai/models", dependencies=[Depends(auth.require_role("admin"))])
 async def list_ai_models(data: AIModelsIn):
     base_url = ai_ocr._normalize_base(data.base_url)
-    if not base_url:
+    models_url = ai_ocr._normalize_base(data.models_url) if data.models_url.strip() else ""
+    if not base_url and not models_url:
         raise HTTPException(400, "URL base requerida")
-    fetched = ai_ocr._fetch_models(base_url, data.api_key)
+    fetched = ai_ocr._fetch_models(base_url, data.api_key, models_url=models_url)
     return {
         "base_url": base_url,
+        "models_url": models_url,
         "reachable": fetched["ok"],
         "models": fetched["models"],
         "error": fetched["error"],

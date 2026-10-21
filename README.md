@@ -42,6 +42,13 @@ No hay usuario/contraseña por defecto; no se puede entrar sin crear esta cuenta
 El sistema impide degradar, desactivar o eliminar al último administrador activo.
 La longitud mínima se puede ajustar con `PASSWORD_MIN_LENGTH` (por defecto 4).
 
+### Acceso a modelos de pago
+El admin habilita por usuario el uso de proveedores de pago (OpenCode o externo)
+desde **Configuración → Usuarios**. También puede activarlo o desactivarlo para
+todos con los botones correspondientes. El admin siempre tiene acceso; los
+usuarios nuevos empiezan sin acceso. Si el proveedor activo es llama.cpp local,
+este permiso no es necesario.
+
 ### Iniciar sesión
 - Abre http://localhost:8081, escribe usuario y contraseña, pulsa **Entrar**.
 - **Recordar sesión**: 30 días. Sin marcar: 8 horas.
@@ -80,19 +87,33 @@ Se pierde el historial de trabajos y usuarios; la configuración IA cifrada
 - **Inicio:** KPIs y gráficos (completitud, cobertura y precisión por campo,
   evolución). El usuario ve solo sus trabajos; el admin, la vista global.
 - **Cargar OCR:** asistente en 3 pasos (archivo → motor → opciones) con progreso
-  en vivo. El modelo de IA se **detecta automáticamente**; no se escribe a mano.
-  Incluye una lista de **documentos cargados** que conserva el PDF/Excel original
-  para reprocesarlo sin volver a subirlo.
+  en vivo. El modelo de IA se **detecta automáticamente** y se elige con un
+  selector compacto, con scroll fijo, búsqueda y navegación por teclado
+  (`Ctrl+K`, `/`, flechas y Enter). Antes de procesar puedes cambiar el
+  **nombre base del documento** y elegir la extensión con botones `.pdf`,
+  `.xlsx` o `.xls`; la extensión no se escribe a mano. Incluye
+  una lista de **documentos cargados** que conserva el PDF/Excel original para
+  reprocesarlo sin volver a subirlo; el admin ve también el propietario. La lista
+  se actualiza al iniciar y terminar un trabajo, y permite renombrar el documento
+  (el nuevo nombre se sincroniza en Historial, Datos e Inicio).
 - **Datos:** tabla espaciosa, filtros por campo/origen/estado, chips de filtros,
   selector de columnas, edición en panel lateral (drawer), selección y exportación.
-  En móvil la tabla se convierte en tarjetas.
+  Al editar una página se muestra la **imagen del PDF** junto a los campos para
+  verificar el OCR, con zoom y apertura en tamaño completo. En móvil la imagen
+  queda arriba y el formulario debajo.
 - **Comparar:** A vs B (otro motor o el ground truth), coincidencia por campo y
   acción “Usar B”. Las diferencias se muestran como tabla en escritorio y tarjetas
-  en móvil.
+  en móvil. La selección A/B se guarda en la URL y se conserva al recargar.
 - **Historial:** filtros por fecha, archivo, motor, estado y usuario (admin);
-  abrir, cancelar, reintentar, descargar y borrar. Borrar un trabajo elimina solo
+  abrir, cancelar, reintentar, descargar y borrar. Los trabajos de IA que
+  terminaron usando OCR local se marcan como **Fallback local**. El admin puede
+  borrar todos los trabajos, documentos y PDFs con contraseña y segunda
+  confirmación; existe una opción para conservar los documentos. También existe
+  borrado por rango. Borrar un trabajo elimina solo
   sus resultados: el documento original permanece en **Cargar OCR**. Para borrar
-  también el archivo hay que usar **Documentos → Borrar documento**.
+  también el archivo hay que usar **Documentos → Borrar documento**. El admin
+  dispone de **Borrar por rango** para eliminar trabajos entre dos fechas,
+  conservando los PDFs salvo que marque la opción de borrar documentos huérfanos.
 - **Configuración (admin):** proveedor de IA, OCR por defecto y usuarios.
 
 Diseño responsive verificado en 1920/1440/1024/768/390, sin emojis ni ilustraciones tipo sticker;
@@ -112,8 +133,8 @@ solo iconos lineales. Los gráficos son SVG propios, sin dependencias ni CDN.
 ## IA local (llama.cpp)
 
 La app **detecta sola** el servidor y los modelos; no hay que escribir modelo ni
-ruta. El campo API key solo aparece para un proveedor **externo de pago**; para
-llama.cpp no se usa.
+ruta. El campo API key solo aparece para proveedores de pago (**OpenCode** o
+externo); para llama.cpp no se usa.
 
 Requisitos del servidor llama.cpp:
 
@@ -134,10 +155,34 @@ http://host.containers.internal:9931/v1
 `localhost` dentro del contenedor apunta al propio contenedor, no al host. Desde
 el host usa `http://127.0.0.1:9931` (no `localhost`, que resuelve a IPv6).
 
-En **Configuración → Proveedor de IA** puedes escanear, elegir modelo (con
-badges de *cargado* y *visión*) y **Probar conexión** (texto + visión), que
-muestra el error exacto si algo falla. Alternativa por entorno: `LLM_BASE_URL`,
-`LLM_API_KEY`, `LLM_MODEL`, `LLM_TIMEOUT`.
+En **Configuración → Proveedor de IA → Local** puedes cambiar la **URL del
+servidor local** (por ejemplo `https://lama.cpp.mapstest.tech`), escanear modelos,
+elegir uno con visión y **Probar conexión** (texto + visión). Si escribes la URL
+sin ruta, se añade `/v1` automáticamente. El botón `?` muestra la ayuda al pasar
+el mouse, se fija al hacer clic y se cierra al hacer clic fuera.
+Alternativa por entorno: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_TIMEOUT`.
+
+## OpenCode Go (modelos de pago)
+
+En **Configuración → Proveedor de IA → OpenCode Go** se configura la suscripción
+Go de OpenCode:
+
+```text
+URL de chat / API:   https://opencode.ai/inference/go/openai/v1
+URL de modelos:      https://opencode.ai/inference/go/v1/models
+API key:             clave de OpenCode Console/Go
+```
+
+La app consulta los modelos, permite elegir uno y prueba conexión de texto y
+visión. Los endpoints `/go/...` son los de la suscripción OpenCode Go; no deben usarse
+los endpoints de Console/pago por uso, que devuelven `402 Insufficient funds`.
+Go incluye modelos gratuitos y de pago. Para OCR elige un modelo con visión.
+`claude-haiku-5-5` funciona con visión usando el adaptador Anthropic de Go;
+DeepSeek V4.1 Flash responde texto pero no procesa imágenes. La migración desde
+el endpoint antiguo de Console configura automáticamente Go y Claude Haiku 5.5. No todos los modelos aceptan imágenes; la prueba de visión
+debe pasar antes de usar el modelo para OCR. La API key se guarda cifrada y solo
+la usa el backend. El acceso de cada usuario se controla en
+**Configuración → Usuarios**.
 
 ## Requisitos
 
@@ -168,25 +213,33 @@ podman pod rm ocr-app
 | `GET /api/health` | — | Health check (abierto) |
 | `POST /api/auth/login` / `logout` / `setup` | — | Sesión / primer admin |
 | `GET /api/auth/me`, `POST /api/auth/change-password` | autenticado | Cuenta propia |
-| `GET/POST/PATCH/DELETE /api/users` | admin | Usuarios y roles |
-| `POST /api/jobs` | admin/usuario | Sube archivo y crea job asíncrono (incluye `model`) |
+| `POST /api/auth/verify-password` | autenticado | Verifica la contraseña para acciones destructivas |
+| `GET/POST/PATCH/DELETE /api/users` | admin | Usuarios, roles y acceso a API de pago |
+| `POST /api/users/paid-access` | admin | Activa/desactiva API de pago para todos |
+| `POST /api/jobs` | admin/usuario | Sube archivo, nombre visible y crea job asíncrono (incluye `model`) |
 | `GET /api/documents` | admin/usuario | Documentos originales conservados (filtrado por dueño) |
 | `POST /api/documents/{id}/jobs` | admin/usuario | Reprocesa un documento sin volver a subirlo |
+| `PATCH /api/documents/{id}` | dueño/admin | Renombra el documento y sincroniza sus trabajos |
 | `DELETE /api/documents/{id}` | dueño/admin | Borra el documento, su archivo y sus trabajos |
 | `GET /api/jobs`, `GET /api/jobs/{id}`, `/events` | autenticado | Historial y progreso (filtrado por dueño) |
+| `GET /api/jobs/bulk-delete/preview` | admin | Previsualiza borrado por rango |
+| `POST /api/jobs/bulk-delete` | admin | Borra trabajos por rango; PDFs opcionales |
+| `POST /api/jobs/delete-all` | admin | Borra todos los trabajos y, por defecto, documentos/PDFs |
 | `POST /api/jobs/{id}/cancel`, `/retry`, `DELETE` | dueño/admin | Control |
 | `GET/PATCH /api/jobs/{id}/results` | dueño/admin | Resultados con filtros y edición |
 | `POST /api/jobs/{id}/export/{xlsx,xls,csv,pdf}` | dueño/admin | Exporta el filtrado |
 | `GET /api/jobs/{id}/compare?other_id=…` | autenticado | Diferencias entre trabajos |
 | `GET /api/stats` | autenticado | Métricas (propias o globales si admin) |
 | `GET /api/ai/providers` | autenticado | Descubre llama.cpp y modelos |
-| `GET/PUT/DELETE /api/settings/ai` | admin | Proveedor IA (clave cifrada solo si es externo) |
+| `GET/PUT/DELETE /api/settings/ai` | admin | Proveedor IA (clave cifrada para OpenCode/externo) |
 | `POST /api/settings/ai/test` | admin | Prueba real de texto + visión |
 | `GET/PUT /api/settings/ocr` | admin | Perfil/DPI/workers por defecto |
 
 ## Base de datos y archivos
 
 - `data/ocr.db` (SQLite): usuarios, sesiones, documentos, jobs, resultados, eventos y auditoría.
+  Incluye `users.paid_ai` y los nombres originales de documentos.
+- `data/pages/<document_id>/<page>.jpg`: caché de imágenes para revisar el OCR.
 - `data/uploads/`, `data/downloads/`: documentos originales y archivos exportados.
 - `data/.secret_key`, `data/auth.json`, `data/ai_settings.enc`: sensibles.
   Si borras `.secret_key`, la configuración IA queda ilegible (vuelve a guardarla).

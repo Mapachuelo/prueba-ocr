@@ -1,7 +1,7 @@
 import { api, downloadFrom } from '../api.js';
 import {
     h, clear, toast, sourceDot, completenessBadge,
-    fmtDateTime, emptyState, openDrawer, modal,
+    fmtDateTime, emptyState, openDrawer, modal, watchDataChanges,
 } from '../ui.js';
 import { icon } from '../icons.js';
 
@@ -181,8 +181,9 @@ export function render(container, { user, params, navigate }) {
             return;
         }
         for (const job of state.jobs) {
+            const engine = job.engine === 'ai' && !job.ai_used ? 'IA (fallback local)' : job.engine;
             jobSelect.append(h('option', { value: job.id },
-                `${fmtDateTime(job.created_at)} · ${job.filename} · ${job.engine}`));
+                `${fmtDateTime(job.created_at)} · ${job.filename} · ${engine}`));
         }
         if (!state.jobId || !state.jobs.some((job) => job.id === state.jobId)) {
             state.jobId = state.jobs[0].id;
@@ -230,7 +231,10 @@ export function render(container, { user, params, navigate }) {
             state.data = data;
             state.visible = null;
             renderTable(data);
-            summary.textContent = `${data.total} filas · ${data.job.filename} · ${data.job.extractor || ''}`;
+            summary.textContent = `${data.total} filas · ${data.job.filename}`
+                + (data.job.original_filename && data.job.original_filename !== data.job.filename
+                    ? ` · original: ${data.job.original_filename}` : '')
+                + ` · ${data.job.extractor || ''}`;
             renderPager(data);
         } catch (error) {
             clear(tableHolder);
@@ -356,11 +360,11 @@ export function render(container, { user, params, navigate }) {
     function openRow(row) {
         const data = state.data;
         const inputs = {};
-        const body = h('div', { class: 'stack' });
+        const formBody = h('div', { class: 'stack' });
         for (const column of data.columns) {
             if (column.key === 'OCR_Raw') continue;
             inputs[column.key] = h('input', { type: 'text', value: row.values[column.key] ?? '' });
-            body.append(h('div', {},
+            formBody.append(h('div', {},
                 h('label', { class: 'field' }, column.label, inputs[column.key]),
                 h('div', { class: 'field-source' },
                     sourceDot(row.sources[column.key]),
@@ -368,16 +372,58 @@ export function render(container, { user, params, navigate }) {
             ));
         }
         if (row.values.OCR_Raw) {
-            body.append(h('div', {},
+            formBody.append(h('div', {},
                 h('div', { class: 'section-title' }, 'Texto OCR crudo'),
                 h('div', { class: 'raw-text' }, row.values.OCR_Raw),
             ));
         }
 
+        const isPdf = data.job.kind === 'pdf';
+        const imageUrl = `/api/jobs/${state.jobId}/pages/${row.page}/image`;
+        let zoom = 1;
+        const image = h('img', {
+            class: 'review-image',
+            alt: `Página ${row.page} del documento`,
+            src: imageUrl,
+        });
+        const imageState = h('div', { class: 'review-image-placeholder' }, 'Cargando imagen…');
+        const frame = h('div', { class: 'review-image-frame' }, image, imageState);
+        const zoomLabel = h('span', { class: 'muted' }, '100%');
+        const setZoom = (value) => {
+            zoom = Math.max(0.5, Math.min(3, value));
+            image.style.width = `${zoom * 100}%`;
+            zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+        };
+        image.addEventListener('load', () => { imageState.hidden = true; });
+        image.addEventListener('error', () => {
+            image.hidden = true;
+            imageState.hidden = false;
+            imageState.textContent = 'No se pudo cargar la imagen de esta página';
+        });
+        const imagePanel = h('div', { class: 'review-image-panel' },
+            h('div', { class: 'review-image-head' },
+                h('strong', {}, `Página ${row.page}`),
+                isPdf ? h('div', { class: 'btn-row' },
+                    h('button', { class: 'btn outline sm', type: 'button', onclick: () => setZoom(zoom - 0.25) }, '−'),
+                    h('button', { class: 'btn outline sm', type: 'button', onclick: () => setZoom(zoom + 0.25) }, '+'),
+                    h('button', { class: 'btn outline sm', type: 'button', onclick: () => setZoom(1) }, 'Ajustar'),
+                    zoomLabel,
+                    h('a', { class: 'btn outline sm', href: imageUrl, target: '_blank', rel: 'noopener' }, 'Abrir'),
+                ) : null,
+            ),
+            isPdf ? frame : h('div', { class: 'review-image-placeholder' },
+                'Este trabajo no tiene imagen de página porque proviene de Excel.'),
+        );
+        if (!isPdf) {
+            image.remove();
+            imageState.remove();
+        }
+
         const drawer = openDrawer({
             title: `Página ${row.page}`,
             subtitle: data.job.filename,
-            content: body,
+            size: 'wide',
+            content: h('div', { class: 'review-grid' }, imagePanel, formBody),
             footer: [
                 h('button', { class: 'btn outline', onclick: () => drawer.close() }, 'Cancelar'),
                 h('button', { class: 'btn primary', onclick: () => saveRow(row, inputs, drawer) }, 'Guardar cambios'),
@@ -505,5 +551,8 @@ export function render(container, { user, params, navigate }) {
         }
     })();
 
-    return {};
+    const stopWatch = watchDataChanges(() => {
+        loadJobs().then(load).catch(() => {});
+    });
+    return { destroy() { stopWatch(); } };
 }

@@ -1,5 +1,5 @@
 import { api, downloadFrom } from '../api.js';
-import { h, clear, toast, statusBadge, confirmDialog, fmtDateTime, emptyState, actionMenu } from '../ui.js';
+import { h, clear, toast, statusBadge, confirmDialog, fmtDateTime, emptyState, actionMenu, modal, notifyDataChanged, watchDataChanges } from '../ui.js';
 import { icon } from '../icons.js';
 
 const STATUS_OPTIONS = [
@@ -31,7 +31,11 @@ export function render(container, { user, navigate }) {
     container.append(h('div', { class: 'card' },
         h('div', { class: 'card-head' },
             h('div', {}, h('h2', {}, 'Historial'), h('p', { class: 'muted' }, 'Estado y acciones de cada trabajo.')),
-            h('button', { class: 'btn outline sm', onclick: () => load() }, icon('refresh'), 'Actualizar'),
+            h('div', { class: 'btn-row' },
+                user.role === 'admin' ? h('button', { class: 'btn danger sm', onclick: openDeleteAll }, icon('trash'), 'Borrar todos') : null,
+                user.role === 'admin' ? h('button', { class: 'btn danger sm', onclick: openBulkDelete }, icon('trash'), 'Borrar por rango') : null,
+                h('button', { class: 'btn outline sm', onclick: () => load() }, icon('refresh'), 'Actualizar'),
+            ),
         ),
         h('div', { class: 'filters' },
             h('label', { class: 'field' }, 'Archivo', q),
@@ -49,6 +53,157 @@ export function render(container, { user, navigate }) {
         holder,
         pager,
     ));
+
+
+
+    function openDeleteAll() {
+        const password = h('input', {
+            type: 'password', placeholder: 'Contraseña actual del administrador',
+            autocomplete: 'current-password',
+        });
+        const message = h('div', {});
+        const preserve = h('input', { type: 'checkbox' });
+        modal('Borrar todos los trabajos', h('div', { class: 'stack' },
+            h('p', { class: 'muted' }, 'Esta acción elimina todos los trabajos, resultados y documentos/PDFs cargados. No se puede deshacer.'),
+            h('label', { class: 'field' }, 'Contraseña', password),
+            h('label', { class: 'checkbox' }, preserve, 'Conservar los PDFs y documentos originales'),
+            message,
+        ), [{
+            label: 'Continuar', class: 'danger',
+            onClick: async (close) => {
+                clear(message);
+                if (!password.value) {
+                    message.append(h('div', { class: 'alert error' }, 'Escribe tu contraseña'));
+                    return;
+                }
+                try {
+                    await api('/api/auth/verify-password', {
+                        method: 'POST', body: { password: password.value },
+                    });
+                } catch (error) {
+                    message.append(h('div', { class: 'alert error' }, error.message));
+                    return;
+                }
+                close();
+                let total = 0;
+                let documents = 0;
+                try {
+                    const [jobsData, docsData] = await Promise.all([
+                        api('/api/jobs?size=1'),
+                        api('/api/documents?limit=200'),
+                    ]);
+                    total = jobsData.total;
+                    documents = docsData.items.length;
+                } catch (error) { /* se confirma sin cantidad */ }
+                const keep = preserve.checked;
+                const ok = await confirmDialog(
+                    keep
+                        ? `¿Eliminar ${total || 'todos los'} trabajos? Los PDFs se conservarán.`
+                        : `¿Eliminar ${total || 'todos los'} trabajos y ${documents || 'todos los'} documentos/PDFs? Esta acción no se puede deshacer.`,
+                );
+                if (!ok) return;
+                try {
+                    const result = await api('/api/jobs/delete-all', {
+                        method: 'POST',
+                        body: { password: password.value, include_documents: !keep },
+                    });
+                    toast(
+                        `Se eliminaron ${result.jobs} trabajo(s)`
+                        + (result.documents ? ` y ${result.documents} documento(s)` : ''),
+                        'success',
+                    );
+                    notifyDataChanged();
+                    load();
+                } catch (error) {
+                    toast(error.message, 'error');
+                }
+            },
+        }]);
+    }
+
+    async function openBulkDelete() {
+        const from = h('input', { type: 'date', value: dateFrom.value || '' });
+        const to = h('input', { type: 'date', value: dateTo.value || '' });
+        const owner = h('select', {}, h('option', { value: '' }, 'Todos los usuarios'));
+        try {
+            const data = await api('/api/users');
+            for (const item of data.items) {
+                owner.append(h('option', { value: item.id }, `${item.username} (${item.role})`));
+            }
+        } catch (error) { /* la lista de usuarios es opcional */ }
+        if (userSelect.value) owner.value = userSelect.value;
+        const includeDocuments = h('input', { type: 'checkbox' });
+        const preview = h('div', { class: 'muted' }, 'Completa el rango y pulsa “Previsualizar”.');
+        const body = h('div', { class: 'stack' },
+            h('p', { class: 'muted' }, 'Se eliminarán los trabajos creados dentro del rango. Por defecto los PDFs se conservan.'),
+            h('div', { class: 'filters' },
+                h('label', { class: 'field' }, 'Fecha inicial', from),
+                h('label', { class: 'field' }, 'Fecha final', to),
+                h('label', { class: 'field' }, 'Usuario', owner),
+            ),
+            h('label', { class: 'checkbox' }, includeDocuments, 'Eliminar también documentos que queden sin trabajos'),
+            preview,
+        );
+        const readForm = () => ({
+            date_from: from.value,
+            date_to: to.value,
+            user_id: owner.value || null,
+            include_documents: includeDocuments.checked,
+        });
+        const doPreview = async () => {
+            const form = readForm();
+            if (!form.date_from || !form.date_to) {
+                toast('Indica la fecha inicial y la final', 'warning');
+                return null;
+            }
+            if (form.date_from > form.date_to) {
+                toast('La fecha inicial no puede ser posterior a la final', 'warning');
+                return null;
+            }
+            const query = new URLSearchParams({ date_from: form.date_from, date_to: form.date_to });
+            if (form.user_id) query.set('user_id', form.user_id);
+            try {
+                const data = await api(`/api/jobs/bulk-delete/preview?${query}`);
+                clear(preview);
+                preview.append(h('div', { class: `alert ${data.active_jobs ? 'warning' : 'info'}` },
+                    `${data.jobs} trabajo(s) · ${data.users} usuario(s) · ${data.documents} documento(s).`
+                    + (data.active_jobs ? ` ${data.active_jobs} en curso; cancélalos antes de borrar.` : ''),
+                ));
+                return data;
+            } catch (error) {
+                clear(preview);
+                preview.append(h('div', { class: 'alert error' }, error.message));
+                return null;
+            }
+        };
+        modal('Borrar por rango', body, [
+            { label: 'Previsualizar', class: 'outline', onClick: doPreview },
+            {
+                label: 'Borrar', class: 'danger',
+                onClick: async (close) => {
+                    const data = await doPreview();
+                    if (!data || data.active_jobs) return;
+                    if (!data.jobs) { toast('No hay trabajos en ese rango', 'warning'); return; }
+                    const ok = await confirmDialog(
+                        `¿Eliminar ${data.jobs} trabajo(s) entre ${from.value} y ${to.value}?`,
+                    );
+                    if (!ok) return;
+                    try {
+                        const result = await api('/api/jobs/bulk-delete', {
+                            method: 'POST', body: readForm(),
+                        });
+                        toast(
+                            `Se eliminaron ${result.jobs} trabajo(s)`
+                            + (result.documents ? ` y ${result.documents} documento(s)` : ''),
+                            'success',
+                        );
+                        close();
+                        load();
+                    } catch (error) { toast(error.message, 'error'); }
+                },
+            },
+        ]);
+    }
 
     async function loadUsers() {
         if (user.role !== 'admin') return;
@@ -104,6 +259,15 @@ export function render(container, { user, navigate }) {
             clear(holder);
             holder.append(h('div', { class: 'alert error' }, error.message));
         }
+    }
+
+    function engineCell(job) {
+        return h('span', {},
+            job.engine,
+            job.engine === 'ai' && !job.ai_used
+                ? h('span', { class: 'badge-status warning', style: 'margin-left:0.35rem' }, 'Fallback local')
+                : null,
+        );
     }
 
     function actionButtons(job) {
@@ -169,8 +333,11 @@ export function render(container, { user, navigate }) {
         for (const job of items) {
             tbody.append(h('tr', {},
                 h('td', {}, fmtDateTime(job.created_at)),
-                h('td', {}, job.filename),
-                h('td', {}, job.engine),
+                h('td', {}, h('strong', {}, job.filename),
+                    job.original_filename && job.original_filename !== job.filename
+                        ? h('div', { class: 'muted' }, `Original: ${job.original_filename}`)
+                        : null),
+                h('td', {}, engineCell(job)),
                 h('td', {}, statusBadge(job.status)),
                 h('td', {}, `${job.progress || 0}%`),
                 h('td', { class: 'num' }, job.total_pages),
@@ -186,8 +353,11 @@ export function render(container, { user, navigate }) {
         for (const job of items) {
             cards.append(h('div', { class: 'mobile-card' },
                 h('div', { class: 'mc-head' }, h('strong', {}, job.filename), statusBadge(job.status)),
+                job.original_filename && job.original_filename !== job.filename
+                    ? h('div', { class: 'mc-row' }, h('span', {}, 'Original'), h('span', {}, job.original_filename))
+                    : null,
                 h('div', { class: 'mc-row' }, h('span', {}, 'Fecha'), h('span', {}, fmtDateTime(job.created_at))),
-                h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, job.engine)),
+                h('div', { class: 'mc-row' }, h('span', {}, 'Motor'), h('span', {}, engineCell(job))),
                 h('div', { class: 'mc-row' }, h('span', {}, 'Filas'), h('span', {}, job.row_count)),
                 h('div', { class: 'btn-row', style: 'margin-top:0.7rem' }, actionButtons(job)),
             ));
@@ -213,5 +383,6 @@ export function render(container, { user, navigate }) {
     })();
     interval = setInterval(load, 15000);
 
-    return { destroy() { clearTimeout(timer); clearInterval(interval); } };
+    const stopWatch = watchDataChanges(load);
+    return { destroy() { clearTimeout(timer); clearInterval(interval); stopWatch(); } };
 }

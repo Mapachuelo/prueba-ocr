@@ -1,3 +1,23 @@
+const _dataChannel = typeof BroadcastChannel !== 'undefined'
+    ? new BroadcastChannel('ocr-data-sync')
+    : null;
+
+export function notifyDataChanged() {
+    window.dispatchEvent(new Event('ocr:data-changed'));
+    try { _dataChannel?.postMessage({ ts: Date.now() }); } catch (error) { /* ignora */ }
+}
+
+export function watchDataChanges(handler) {
+    const local = () => handler();
+    const remote = () => handler();
+    window.addEventListener('ocr:data-changed', local);
+    _dataChannel?.addEventListener('message', remote);
+    return () => {
+        window.removeEventListener('ocr:data-changed', local);
+        _dataChannel?.removeEventListener('message', remote);
+    };
+}
+
 export function h(tag, attrs = {}, ...children) {
     const el = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs || {})) {
@@ -53,6 +73,47 @@ export function modal(title, content, actions = [], onClose = null) {
     return { close, body };
 }
 
+export function helpPopover(content, label = 'Ayuda') {
+    const wrap = h('span', { class: 'help-wrap' });
+    const button = h('button', {
+        type: 'button', class: 'help-btn', 'aria-label': label,
+        'aria-expanded': 'false',
+    }, '?');
+    const popover = h('div', { class: 'help-popover', role: 'tooltip', hidden: true }, content);
+    let pinned = false;
+    const open = () => {
+        popover.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+    };
+    const close = () => {
+        pinned = false;
+        popover.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+    };
+    button.addEventListener('pointerenter', open);
+    wrap.addEventListener('pointerleave', () => {
+        if (!pinned) {
+            popover.hidden = true;
+            button.setAttribute('aria-expanded', 'false');
+        }
+    });
+    button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        pinned = !pinned;
+        if (pinned) open();
+        else close();
+    });
+    document.addEventListener('click', (event) => {
+        if (!wrap.contains(event.target)) close();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') close();
+    });
+    wrap.append(button, popover);
+    return wrap;
+}
+
 export function actionMenu(items, label = 'Más acciones') {
     return h('button', {
         class: 'btn outline sm menu-toggle',
@@ -83,7 +144,7 @@ export function confirmDialog(message) {
     });
 }
 
-export function openDrawer({ title, subtitle = '', content, footer = [], onClose = null }) {
+export function openDrawer({ title, subtitle = '', content, footer = [], onClose = null, size = '' }) {
     const root = document.getElementById('modalRoot');
     const close = () => {
         backdrop.remove();
@@ -91,7 +152,7 @@ export function openDrawer({ title, subtitle = '', content, footer = [], onClose
         if (onClose) onClose();
     };
     const backdrop = h('div', { class: 'drawer-backdrop', onclick: close });
-    const panel = h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true' },
+    const panel = h('aside', { class: `drawer ${size}`.trim(), role: 'dialog', 'aria-modal': 'true' },
         h('div', { class: 'drawer-head' },
             h('div', {}, h('h2', {}, title), subtitle ? h('p', { class: 'muted' }, subtitle) : null),
             h('button', { class: 'icon-btn', onclick: close, 'aria-label': 'Cerrar' }, '×'),
