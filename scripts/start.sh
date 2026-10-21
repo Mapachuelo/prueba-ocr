@@ -30,4 +30,4 @@ echo ""
 echo "=== Pod iniciado ==="
 podman pod list
 echo ""
-echo "Accede a: http://localhost:8080"
+echo "Accede a: http://localhost:8081"

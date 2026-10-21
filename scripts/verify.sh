@@ -4,32 +4,59 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="$PROJECT_DIR/data"
 PDF_PATH="${1:?Uso: verify.sh <ruta-al-pdf>}"
+BASE_URL="${OCR_BASE_URL:-http://localhost:8081}"
+OCR_USER="${OCR_USER:-admin}"
+OCR_PASS="${OCR_PASS:?Define OCR_PASS con la contraseña del usuario}"
+COOKIE="$(mktemp)"
+trap 'rm -f "$COOKIE"' EXIT
 
 echo "============================================"
 echo "VERIFICACIÓN: Extracción de cédulas a Excel"
 echo "PDF: $PDF_PATH"
 echo "============================================"
 
-cp "$PDF_PATH" "$DATA_DIR/uploads/verify_input.pdf"
-echo "[1/4] PDF copiado al volumen"
+echo "[0/5] Iniciando sesión..."
+LOGIN_CODE=$(curl -s -o /dev/null -w "%{http_code}" -c "$COOKIE" \
+    -X POST "$BASE_URL/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -H "X-Requested-With: XMLHttpRequest" \
+    -d "{\"username\":\"$OCR_USER\",\"password\":\"$OCR_PASS\"}")
+if [ "$LOGIN_CODE" != "200" ]; then
+    echo "ERROR: login falló ($LOGIN_CODE). Revisa OCR_USER/OCR_PASS."
+    exit 1
+fi
 
-echo "[2/4] Procesando con OCR..."
-RESP_JSON=$(curl -s --max-time 600 -X POST \
+cp "$PDF_PATH" "$DATA_DIR/uploads/verify_input.pdf"
+echo "[1/5] PDF copiado al volumen"
+
+echo "[2/5] Procesando con OCR..."
+RESP_JSON=$(curl -s --max-time 600 -b "$COOKIE" \
+    -H "X-Requested-With: XMLHttpRequest" \
+    -X POST \
     -F "file=@$DATA_DIR/uploads/verify_input.pdf" \
-    http://localhost:8080/api/upload/pdf)
+    "$BASE_URL/api/upload/pdf")
 echo "$RESP_JSON" > "$DATA_DIR/verify_response.json"
 SESSION_ID=$(echo "$RESP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
 echo "  Session: $SESSION_ID"
 
-echo "[3/4] Descargando XLSX..."
-curl -s -X POST http://localhost:8080/api/download/xlsx \
+echo "[3/5] Descargando XLSX..."
+curl -s -b "$COOKIE" -H "X-Requested-With: XMLHttpRequest" \
+    -X POST "$BASE_URL/api/download/xlsx" \
     -H "Content-Type: application/json" \
     -d "{\"session_id\": \"$SESSION_ID\"}" \
     -o "$DATA_DIR/verify_output.xlsx"
 echo "  Guardado: data/verify_output.xlsx"
 
+echo "[4/5] Descargando XLS..."
+curl -s -b "$COOKIE" -H "X-Requested-With: XMLHttpRequest" \
+    -X POST "$BASE_URL/api/download/xls" \
+    -H "Content-Type: application/json" \
+    -d "{\"session_id\": \"$SESSION_ID\"}" \
+    -o "$DATA_DIR/verify_output.xls"
+echo "  Guardado: data/verify_output.xls"
+
 echo ""
-echo "[4/4] RESUMEN DE EXTRACCIÓN:"
+echo "[5/5] RESUMEN DE EXTRACCIÓN:"
 echo "============================================"
 python3 -c "
 import json
@@ -80,6 +107,7 @@ echo "============================================"
 echo "Archivos generados:"
 echo "  - data/verify_response.json"
 echo "  - data/verify_output.xlsx"
+echo "  - data/verify_output.xls"
 echo ""
 echo "Para verificar: abre data/verify_output.xlsx y"
 echo "compara con las imágenes del PDF original."
